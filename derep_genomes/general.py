@@ -9,7 +9,7 @@ import collections
 import textwrap
 import logging
 
-# from derep_genomes.__init__ import __version__
+from derep_genomes.__init__ import __version__
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
@@ -49,7 +49,7 @@ def get_arguments():
         "-v",
         "--version",
         action="version",
-        version="%(prog)s " + derep_genomes.__version__,
+        version="%(prog)s " + __version__,
         help="print debug messages to stderr",
     )
     args = parser.parse_args()
