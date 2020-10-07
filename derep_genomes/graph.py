@@ -2,7 +2,7 @@ import networkx as nx
 import math
 import tempfile
 from statistics import mean
-import community as community_louvain
+from community import community_louvain
 import pandas as pd
 from scipy import stats
 import subprocess
@@ -14,6 +14,9 @@ import os
 from itertools import product
 from simple_slurm import Slurm
 import yaml
+from multiprocessing import Pool
+import tqdm
+import io, sys
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
@@ -33,30 +36,6 @@ def pairwise_fastANI(assemblies, threads, temp_dir):
         glist,
         "-t",
         str(threads),
-        "-o",
-        rfile,
-    ]
-    subprocess.run(fastANI_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    return rfile
-
-
-def partition_genomes():
-    pass
-
-
-def pairwise_fastANI_slurm(assemblies, slurm_config, temp_dir):
-    glist = temp_dir + "/assm_list.txt"
-    rfile = temp_dir + "/fastANI.txt"
-    with open(glist, "w") as outfile:
-        for assm in assemblies:
-            outfile.write("%s\n" % assm)
-
-    fastANI_cmd = [
-        "fastANI",
-        "--ql",
-        glist,
-        "--rl",
-        glist,
         "-o",
         rfile,
     ]
@@ -86,7 +65,7 @@ def process_fastANI_results(rfile):
     return df
 
 
-def binary_search_filter(g, low, high, weights):
+def binary_search_filter(g, low, high, weights, debug):
     """
     This functions filters a graph by finding the smallest weight where
     the graph gets disconnected.
@@ -104,16 +83,17 @@ def binary_search_filter(g, low, high, weights):
             if float(d["weight"]) <= float(weights[mid])
         ]
         x.remove_edges_from(edges2rm)
-        print(
-            "low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
-                low,
-                mid,
-                high,
-                weights[mid],
-                nx.number_connected_components(x),
-                x.number_of_edges(),
+        if debug:
+            logging.info(
+                "Filtering -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
+                    low,
+                    mid,
+                    high,
+                    weights[mid],
+                    nx.number_connected_components(x),
+                    x.number_of_edges(),
+                )
             )
-        )
 
         if (mid - low) == 0:
             edges2rm = [
@@ -122,17 +102,24 @@ def binary_search_filter(g, low, high, weights):
                 if float(d["weight"]) <= float(weights[mid])
             ]
             x.remove_edges_from(edges2rm)
-            print(
-                "Final -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
-                    low,
-                    mid,
-                    high,
-                    weights[mid],
-                    nx.number_connected_components(x),
-                    x.number_of_edges(),
+            if debug:
+                logging.info(
+                    "Final -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
+                        low,
+                        mid,
+                        high,
+                        weights[mid],
+                        nx.number_connected_components(x),
+                        x.number_of_edges(),
+                    )
                 )
-            )
-            return x, weights[mid]
+            if nx.number_connected_components(x) == 1:
+                return x, weights[mid]
+            else:
+                logging.info(
+                    "Couldn't find a filtering threshold, returning original graph"
+                )
+                return g, None
 
         if (high - low) == 0:
             edges2rm = [
@@ -141,23 +128,42 @@ def binary_search_filter(g, low, high, weights):
                 if float(d["weight"]) <= float(weights[mid + 1])
             ]
             x.remove_edges_from(edges2rm)
-            print(
-                "low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
-                    low,
-                    mid,
-                    high,
-                    weights[mid],
-                    nx.number_connected_components(x),
-                    x.number_of_edges(),
+            if debug:
+                logging.info(
+                    "low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
+                        low,
+                        mid,
+                        high,
+                        weights[mid],
+                        nx.number_connected_components(x),
+                        x.number_of_edges(),
+                    )
                 )
-            )
-            return x, weights[mid]
+            if nx.number_connected_components(x) == 1:
+                print(nx.number_connected_components(x))
+                return x, weights[mid]
+            else:
+                logging.info(
+                    "Couldn't find a filtering threshold, returning original graph"
+                )
+                return g, None
 
         if nx.is_connected(x):
-            x = binary_search_filter(g, low=mid, high=high, weights=weights)
+            x, w = binary_search_filter(
+                g, low=mid, high=high, weights=weights, debug=debug
+            )
         else:
-            x = binary_search_filter(g, low=low, high=mid, weights=weights)
-        return x
+            x, w = binary_search_filter(
+                g, low=low, high=mid, weights=weights, debug=debug
+            )
+
+        if nx.number_connected_components(x) == 1:
+            return x, w
+        else:
+            logging.info(
+                "Couldn't find a filtering threshold, returning original graph"
+            )
+            return g, None
 
 
 def get_reps(graph, partition):
@@ -205,52 +211,117 @@ def create_slurm_commands(files, wdir):
     return cmds, ofiles, odir
 
 
-def run_slurm_jobs(cmds, ofiles, slurm_config, odir):
+def check_slurm_output(files):
+    pass
+
+
+def split_fixed_size(lst, n):
+    splits = [lst[i * n : (i + 1) * n] for i in range((len(lst) + n - 1) // n)]
+    return splits
+
+
+def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
     rfile = os.path.join(odir, "fastANI_out_jobs.txt")
     with open(rfile, "w") as outfile:
         for cmd in cmds:
             outfile.write("%s\n" % cmd)
 
     slurm = Slurm(**yaml.load(slurm_config, Loader=yaml.FullLoader))
-    slurm.set_array(range(len(cmds)))
-    slurm.add_arguments(wait="")
 
-    bjob = "$(awk -vJ=" + "$SLURM_ARRAY_TASK_ID " + "'NR==J' " + rfile + " )"
-    job_id = slurm.sbatch(bjob)
+    if len(cmds) > max_jobs_array:
+        logging.info(
+            "The number of jobs ({}) is larger than the allowed array size ({}). Splitting jobs..".format(
+                len(cmds), max_jobs_array
+            )
+        )
 
-    
+    job_ranges = split_fixed_size(range(1, len(cmds) + 1), max_jobs_array)
+    job_ids = []
+    logging.info(
+        "Mapping {} jobs to SLURM in {} batch(es)".format(len(cmds), len(job_ranges))
+    )
+    for r in job_ranges:
+        slurm.set_array(r)
+        slurm.add_arguments(wait="")
+        bjob = "$(awk -vJ=" + "$SLURM_ARRAY_TASK_ID " + "'NR==J' " + rfile + " )"
+        text_trap = io.StringIO()
+        sys.stdout = text_trap
+        job_id = slurm.sbatch(bjob)
+        sys.stdout = sys.__stdout__
+        job_ids.append(job_id)
+
+    return job_ids
 
 
-def dereplicate(acc_to_assemblies, threads, threshold, chunks, slurm_config, tmp_dir):
+def reduce_slurm_jobs(ofiles, threads, debug):
+    if debug is True:
+        dfs = list(map(process_fastANI_results, ofiles))
+    else:
+        p = Pool(threads)
+        dfs = list(
+            tqdm.tqdm(
+                p.imap_unordered(process_fastANI_results, ofiles), total=len(ofiles)
+            )
+        )
+    dfs = pd.concat(dfs)
+    return dfs
+
+
+def dereplicate(
+    acc_to_assemblies,
+    threads,
+    threshold,
+    chunks,
+    slurm_config,
+    tmp_dir,
+    debug,
+    max_jobs_array,
+):
     """
     This function dereplicates genomes by Taxon by:
-    1.
+    1. Calculating ANI and fraction aligned
+    2. Dynamically filters the ANI graph
+    3.
     """
     all_assemblies = sorted(acc_to_assemblies.values())
     derep_assemblies = []
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
-        # If
-        if len(all_assemblies) <= 50:
+
+        if len(all_assemblies) <= 50 or slurm_config is None:
+            logging.info(
+                "Found {} assemblies, using default fastANI with {} threads".format(
+                    len(all_assemblies), threads
+                )
+            )
             ani_results = pairwise_fastANI(
                 assemblies=all_assemblies, threads=threads, temp_dir=temp_dir
             )
+            logging.info("Processing ANI results")
+            pairwise_distances = process_fastANI_results(ani_results)
         else:
-            n = math.ceil(len(all_assemblies) / chunks)
-            chunks = [
-                all_assemblies[i * n : (i + 1) * n]
-                for i in range((len(all_assemblies) + n - 1) // n)
-            ]
+            n = chunks
+            chunks = split_fixed_size(all_assemblies, n)
+            # chunks = [
+            #     all_assemblies[i * n : (i + 1) * n]
+            #     for i in range((len(all_assemblies) + n - 1) // n)
+            # ]
+            logging.info(
+                "Found {} assemblies, creating {} chunks with {} genomes".format(
+                    len(all_assemblies), len(chunks), n
+                )
+            )
             # save chunks to disk
             files, wdir = save_chunks_to_disk(chunks, temp_dir)
             # Create fastANI commands
             cmds, ofiles, odir = create_slurm_commands(files, wdir)
             # Run slurm array job
-            jobs = run_slurm_jobs(cmds, ofiles, slurm_config, odir)
-            exit(0)
-            # Collect results
-
-        pairwise_distances = process_fastANI_results(ani_results)
+            slurm_jobs = map_slurm_jobs(
+                cmds, ofiles, slurm_config, odir, max_jobs_array
+            )
+            logging.info("Reducing SLURM jobs and processing ANI results")
+            pairwise_distances = reduce_slurm_jobs(ofiles, threads, debug)
         # Convert pw dist to graph
+        logging.info("Generating ANI graph")
         M = nx.from_pandas_edgelist(
             pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
         )
@@ -270,21 +341,27 @@ def dereplicate(acc_to_assemblies, threads, threshold, chunks, slurm_config, tmp
             weights.append(d["weight"])
 
         weights = sorted(set(weights))
-        print("Filtering networks...")
+        logging.info("Filtering ANI graph")
         G_filt, w_filt = binary_search_filter(
-            g=G, low=0, high=len(weights) - 1, weights=weights
+            g=G, low=0, high=len(weights) - 1, weights=weights, debug=debug
         )
+
+        logging.info("Finding genome representative using Louvain")
         partition = community_louvain.best_partition(G_filt, resolution=1.0)
 
-        print(
-            "w_filt: {} components: {} edges: {} communities: {}".format(
+        logging.info(
+            "Graph properties: w_filt={} components={} edges={} communities={}".format(
                 w_filt,
                 nx.number_connected_components(G_filt),
                 G_filt.number_of_edges(),
                 len(set([partition[k] for k in partition])),
             )
         )
-
+        logging.info(
+            "Refining genome selection (length difference and fraction aligned, z-score={})".format(
+                threshold
+            )
+        )
         reps, subgraphs = get_reps(graph=G_filt, partition=partition)
         derep_assemblies = []
         for i in range(len(reps)):
@@ -294,7 +371,6 @@ def dereplicate(acc_to_assemblies, threads, threshold, chunks, slurm_config, tmp
                 threshold=threshold,
                 pw=pairwise_distances,
             )
-            print("ref: {} -> {}".format(reps[i], candidates))
             if len(candidates) > 1:
                 for candidate in candidates:
                     derep_assemblies.append(candidate)
@@ -334,15 +410,21 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
                 }
             )
     df = pd.DataFrame(results)
-    df["z_score_aln"] = stats.zscore(df["aln_frac"])
-    df["z_score_diff"] = stats.zscore(df["len_diff"])
-
-    df = df[
-        (df["z_score_aln"] <= (-1 * threshold))
-        | (df["z_score_diff"].abs() >= threshold)
-    ]
-    assms = df["target"].tolist()
-    assms.append(rep)
+    if len(df.index) < 2:
+        if (source_len / len_diff) >= 0.1:
+            assms = df["target"].tolist()
+            assms.append(rep)
+        else:
+            assms = [rep]
+    else:
+        df["z_score_aln"] = stats.zscore(df["aln_frac"])
+        df["z_score_diff"] = stats.zscore(df["len_diff"])
+        df = df[
+            (df["z_score_aln"] <= (-1 * threshold))
+            | (df["z_score_diff"].abs() >= threshold)
+        ]
+        assms = df["target"].tolist()
+        assms.append(rep)
     if df.empty:
         return [rep]
     else:

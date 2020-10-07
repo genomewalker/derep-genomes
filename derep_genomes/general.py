@@ -51,10 +51,19 @@ def get_arguments():
     )
     parser.add_argument(
         "-c",
-        "--chunks",
+        "--chunk-size",
+        dest="chunks",
         type=int,
-        default=32,
-        help="Number of chunks to create (for fastANI in slurm)",
+        default=5,
+        help="Number of genomes in each chunk for fastANI in SLURM",
+    )
+    parser.add_argument(
+        "-a",
+        "--slurm-max-array-size",
+        dest="max_jobs_array",
+        type=int,
+        default=1000,
+        help="Slurm maximum job array size",
     )
     parser.add_argument(
         "-d", "--debug", action="store_true", help="print debug messages to stderr"
@@ -68,6 +77,16 @@ def get_arguments():
         metavar="FILE",
         type=lambda x: is_valid_file(parser, x),
     )
+
+    parser.add_argument(
+        "--taxa",
+        dest="selected_taxa",
+        required=False,
+        help="File with selected taxa. Taxa should have the following formar: d__;p__;c__;o__;f__;g__;s__",
+        metavar="FILE",
+        type=lambda x: is_valid_file(parser, x),
+    )
+
     parser.add_argument(
         "-v",
         "--version",
@@ -93,13 +112,13 @@ def load_classifications(tax_file):
 
 
 def find_all_assemblies(in_dir):
-    print("\nLooking for files in {}:".format(in_dir))
+    logging.info("Finding assemblies in {}".format(in_dir))
     all_assemblies = [
         str(x)
         for x in sorted(pathlib.Path(in_dir).absolute().glob("**/*"))
         if x.is_file()
     ]
-    print("found {:,} files".format(len(all_assemblies)))
+    logging.info("Found {} files in {}".format(len(all_assemblies), in_dir))
     return all_assemblies
 
 
@@ -107,6 +126,7 @@ def find_assemblies_for_accessions(accessions, all_assemblies):
     acc_to_assemblies = {}
     found_count, total_count = 0, 0
     not_found = []
+
     for accession in accessions:
         total_count += 1
         assembly_filename = get_assembly_filename(accession, all_assemblies)
@@ -115,17 +135,17 @@ def find_assemblies_for_accessions(accessions, all_assemblies):
             acc_to_assemblies[accession] = assembly_filename
         else:
             not_found.append(accession)
-        print(
-            "\r{:,} / {:,} assemblies found".format(found_count, total_count),
-            end="",
-            flush=True,
-        )
+        import time
+
+    logging.info("Found {}/{} assemblies".format(found_count, total_count))
+
     if not_found:
-        print("    failed to find assemblies for the following accessions:")
+        logging.info("Failed to find assemblies for the following accessions:")
         wrapper = textwrap.TextWrapper(
             initial_indent="    ", subsequent_indent="    ", width=100
         )
-        print(wrapper.fill(", ".join(not_found)))
+        logging.info(wrapper.fill(", ".join(not_found)))
+
     return acc_to_assemblies
 
 
