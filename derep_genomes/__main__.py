@@ -50,6 +50,7 @@ def process_one_taxon(
     max_jobs_array,
 ):
     accessions = sorted(accessions)
+    print()
     logging.info("Dereplicating {}".format(classification))
     acc_to_assemblies = find_assemblies_for_accessions(accessions, all_assemblies)
     if len(acc_to_assemblies) == 0:

@@ -8,6 +8,8 @@ requirements = [
     "networkx>=2.5",
     "Bio>=0.0.6",
     "community>=1.0.0b1",
+    "simple_slurm==0.1.5",
+    "tqdm==4.50.0",
 ]
 
 setup(

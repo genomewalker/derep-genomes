@@ -287,7 +287,9 @@ def dereplicate(
     derep_assemblies = []
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
 
-        if len(all_assemblies) <= 50 or slurm_config is None:
+        if len(all_assemblies) <= 20 or slurm_config is None:
+            if (len(all_assemblies) * len(all_assemblies)) < threads:
+                threads = len(all_assemblies) * len(all_assemblies)
             logging.info(
                 "Found {} assemblies, using default fastANI with {} threads".format(
                     len(all_assemblies), threads
@@ -375,9 +377,12 @@ def dereplicate(
                 for candidate in candidates:
                     derep_assemblies.append(candidate)
             else:
-                derep_assemblies.append(candidate)
-
-    return set(derep_assemblies)
+                derep_assemblies = candidates
+    derep_assemblies = set(derep_assemblies)
+    logging.info(
+        "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
+    )
+    return derep_assemblies
 
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):
@@ -410,6 +415,7 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
                 }
             )
     df = pd.DataFrame(results)
+
     if len(df.index) < 2:
         if (source_len / len_diff) >= 0.1:
             assms = df["target"].tolist()
