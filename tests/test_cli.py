@@ -1,4 +1,4 @@
-from derep_genomes import cli
+from derep_genomes import main
 
-def test_cli_template():
+def test_maib_template():
     assert cli.cli() is None

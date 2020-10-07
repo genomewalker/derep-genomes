@@ -2,7 +2,12 @@ from setuptools import setup
 import versioneer
 
 requirements = [
-    # package requirements go here
+    "pandas>=1.1.2",
+    "python_louvain>=0.14",
+    "scipy>=1.5.2",
+    "networkx>=2.5",
+    "Bio>=0.0.6",
+    "community>=1.0.0b1",
 ]
 
 setup(

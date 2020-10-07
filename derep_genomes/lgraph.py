@@ -7,6 +7,10 @@ import pandas as pd
 from scipy import stats
 import subprocess
 import pandas as pd
+from derep_genomes.general import get_open_func, get_assembly_length, get_contig_lengths
+import logging
+
+logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
 
 def pairwise_fastANI(assemblies, threads, temp_dir):
@@ -28,6 +32,34 @@ def pairwise_fastANI(assemblies, threads, temp_dir):
         rfile,
     ]
     subprocess.run(fastANI_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return rfile
+
+
+def partition_genomes():
+    pass
+
+
+def pairwise_fastANI_slurm(assemblies, slurm_config, temp_dir):
+    glist = temp_dir + "/assm_list.txt"
+    rfile = temp_dir + "/fastANI.txt"
+    with open(glist, "w") as outfile:
+        for assm in assemblies:
+            outfile.write("%s\n" % assm)
+
+    fastANI_cmd = [
+        "fastANI",
+        "--ql",
+        glist,
+        "--rl",
+        glist,
+        "-o",
+        rfile,
+    ]
+    subprocess.run(fastANI_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return rfile
+
+
+def process_fastANI_results(rfile):
     df = pd.read_csv(
         rfile,
         sep="\t",
@@ -147,11 +179,15 @@ def dereplicate(acc_to_assemblies, threads, threshold):
     all_assemblies = sorted(acc_to_assemblies.values())
     derep_assemblies = []
     with tempfile.TemporaryDirectory() as temp_dir:
-        # mash_sketch = build_mash_sketch(all_assemblies, threads, temp_dir)
-        pairwise_distances = pairwise_fastANI(
-            assemblies=all_assemblies, threads=threads, temp_dir=temp_dir
-        )
-
+        # If
+        if len(all_assemblies) <= 50:
+            ani_results = pairwise_fastANI(
+                assemblies=all_assemblies, threads=threads, temp_dir=temp_dir
+            )
+        else:
+            
+            pass
+        pairwise_distances = process_fastANI_results(ani_results)
         # Convert pw dist to graph
         M = nx.from_pandas_edgelist(
             pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
@@ -249,30 +285,3 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
         return [rep]
     else:
         return assms
-
-
-def get_assembly_length(filename):
-    contig_lengths = sorted(get_contig_lengths(filename), reverse=True)
-    total_length = sum(contig_lengths)
-    return total_length
-
-
-def get_contig_lengths(filename):
-    lengths = []
-    with get_open_func(filename)(filename, "rt") as fasta_file:
-        name = ""
-        sequence = ""
-        for line in fasta_file:
-            line = line.strip()
-            if not line:
-                continue
-            if line[0] == ">":  # Header line = start of new contig
-                if name:
-                    lengths.append(len(sequence))
-                    sequence = ""
-                name = line[1:].split()[0]
-            else:
-                sequence += line
-        if name:
-            lengths.append(len(sequence))
-    return lengths

@@ -7,7 +7,53 @@ import os
 import pathlib
 import collections
 import textwrap
-from derep_genomes.lgraph import dereplicate
+import logging
+
+# from derep_genomes.__init__ import __version__
+
+logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+
+
+def get_arguments():
+    parser = argparse.ArgumentParser(description="Cluster assemblies in each taxon")
+    parser.add_argument(
+        "in_dir", type=str, help="Directory containing all GTDB assemblies"
+    )
+    parser.add_argument(
+        "out_dir",
+        type=str,
+        help="Directory where dereplicated assemblies will be copied",
+    )
+    parser.add_argument("tax_file", type=str, help="GTDB taxonomy file")
+    parser.add_argument(
+        "-t",
+        "--threshold",
+        type=float,
+        default=2,
+        help="Z-score filtering threshold",
+    )
+    parser.add_argument(
+        "-p", "--threads", type=int, default=16, help="Number of threads (for fastANI)"
+    )
+    parser.add_argument(
+        "-c",
+        "--chunks",
+        type=int,
+        default=32,
+        help="Number of chunks to create (for fastANI in slurm)",
+    )
+    parser.add_argument(
+        "-d", "--debug", action="store_true", help="print debug messages to stderr"
+    )
+    parser.add_argument(
+        "-v",
+        "--version",
+        action="version",
+        version="%(prog)s " + derep_genomes.__version__,
+        help="print debug messages to stderr",
+    )
+    args = parser.parse_args()
+    return args
 
 
 def load_classifications(tax_file):
@@ -21,32 +67,6 @@ def load_classifications(tax_file):
             taxon = parts[1]
             classifications[taxon].append(accession)
     return classifications
-
-
-def process_one_taxon(
-    classification, accessions, all_assemblies, out_dir, threads, threshold
-):
-    accessions = sorted(accessions)
-    print(classification)
-    acc_to_assemblies = find_assemblies_for_accessions(accessions, all_assemblies)
-    if len(acc_to_assemblies) == 0:
-        return
-    if len(acc_to_assemblies) == 1:
-        only_assembly = list(acc_to_assemblies.values())[0]
-        print("Only one assembly for this species, copying to output directory:")
-        print("    {} -> {}".format(only_assembly, out_dir))
-        shutil.copy(only_assembly, out_dir)
-    else:
-        print(
-            "{:,} assemblies for this species, clustering to dereplicate.".format(
-                len(acc_to_assemblies)
-            )
-        )
-        derep_assemblies = dereplicate(acc_to_assemblies, threads, threshold)
-        print("Copying dereplicated assemblies to output directory:")
-        for assembly in derep_assemblies:
-            print("    {} -> {}".format(assembly, out_dir))
-            shutil.copy(assembly, out_dir)
 
 
 def find_all_assemblies(in_dir):
@@ -138,25 +158,28 @@ def get_open_func(filename):
         return open
 
 
-def get_arguments():
-    parser = argparse.ArgumentParser(description="Cluster assemblies in each taxon")
-    parser.add_argument(
-        "in_dir", type=str, help="Directory containing all GTDB assemblies"
-    )
-    parser.add_argument(
-        "out_dir",
-        type=str,
-        help="Directory where dereplicated assemblies will be copied",
-    )
-    parser.add_argument("tax_file", type=str, help="GTDB taxonomy file")
-    parser.add_argument(
-        "--threshold",
-        type=float,
-        default=2,
-        help="Z-score filtering threshold",
-    )
-    parser.add_argument(
-        "--threads", type=int, default=16, help="Number of threads (for Mash)"
-    )
-    args = parser.parse_args()
-    return args
+def get_assembly_length(filename):
+    contig_lengths = sorted(get_contig_lengths(filename), reverse=True)
+    total_length = sum(contig_lengths)
+    return total_length
+
+
+def get_contig_lengths(filename):
+    lengths = []
+    with get_open_func(filename)(filename, "rt") as fasta_file:
+        name = ""
+        sequence = ""
+        for line in fasta_file:
+            line = line.strip()
+            if not line:
+                continue
+            if line[0] == ">":  # Header line = start of new contig
+                if name:
+                    lengths.append(len(sequence))
+                    sequence = ""
+                name = line[1:].split()[0]
+            else:
+                sequence += line
+        if name:
+            lengths.append(len(sequence))
+    return lengths

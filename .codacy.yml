@@ -1,0 +1,8 @@
+---
+exclude_paths:
+  - 'derep_genomes/_version.py'
+  - 'tests/**/*'
+  - 'tests/*'
+  - 'benchmarks/**/*'
+  - 'setup.py'
+  - 'versioneer.py'

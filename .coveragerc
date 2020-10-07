@@ -1,0 +1,7 @@
+[report]
+omit =
+    setup.py
+    derep_genomes/__main__.py
+    derep_genomes/_version.py
+    versioneer.py
+    tests/*

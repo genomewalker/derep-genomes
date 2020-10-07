@@ -19,17 +19,47 @@ see <https://www.gnu.org/licenses/>.
 
 from derep_genomes import __version__
 
-
 import subprocess
 import sys
 import tempfile
 import os
+import shutil
 from derep_genomes.general import (
     get_arguments,
     find_all_assemblies,
     load_classifications,
-    process_one_taxon,
+    find_assemblies_for_accessions,
 )
+from derep_genomes.lgraph import dereplicate
+import logging
+
+logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+
+
+def process_one_taxon(
+    classification, accessions, all_assemblies, out_dir, threads, threshold
+):
+    accessions = sorted(accessions)
+    print(classification)
+    acc_to_assemblies = find_assemblies_for_accessions(accessions, all_assemblies)
+    if len(acc_to_assemblies) == 0:
+        return
+    if len(acc_to_assemblies) == 1:
+        only_assembly = list(acc_to_assemblies.values())[0]
+        print("Only one assembly for this species, copying to output directory:")
+        print("    {} -> {}".format(only_assembly, out_dir))
+        shutil.copy(only_assembly, out_dir)
+    else:
+        print(
+            "{:,} assemblies for this species, clustering to dereplicate.".format(
+                len(acc_to_assemblies)
+            )
+        )
+        derep_assemblies = dereplicate(acc_to_assemblies, threads, threshold)
+        print("Copying dereplicated assemblies to output directory:")
+        for assembly in derep_assemblies:
+            print("    {} -> {}".format(assembly, out_dir))
+            shutil.copy(assembly, out_dir)
 
 
 def main():
