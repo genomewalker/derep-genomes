@@ -9,7 +9,7 @@ import collections
 import textwrap
 import logging
 
-from derep_genomes.__init__ import __version__
+from derep_genomes import __version__
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
