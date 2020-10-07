@@ -21,7 +21,6 @@ from derep_genomes import __version__
 
 import subprocess
 import sys
-import tempfile
 import os
 import shutil
 from derep_genomes.general import (
@@ -32,12 +31,21 @@ from derep_genomes.general import (
 )
 from derep_genomes.lgraph import dereplicate
 import logging
+import pathlib
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
 
 def process_one_taxon(
-    classification, accessions, all_assemblies, out_dir, threads, threshold
+    classification,
+    accessions,
+    all_assemblies,
+    out_dir,
+    threads,
+    threshold,
+    chunks,
+    slurm_config,
+    tmp_dir,
 ):
     accessions = sorted(accessions)
     print(classification)
@@ -55,7 +63,9 @@ def process_one_taxon(
                 len(acc_to_assemblies)
             )
         )
-        derep_assemblies = dereplicate(acc_to_assemblies, threads, threshold)
+        derep_assemblies = dereplicate(
+            acc_to_assemblies, threads, threshold, chunks, slurm_config, tmp_dir
+        )
         print("Copying dereplicated assemblies to output directory:")
         for assembly in derep_assemblies:
             print("    {} -> {}".format(assembly, out_dir))
@@ -67,6 +77,7 @@ def main():
     all_assemblies = find_all_assemblies(args.in_dir)
     os.makedirs(args.out_dir, exist_ok=True)
     classifications = load_classifications(args.tax_file)
+    tmp_dir = pathlib.Path(args.tmp_dir).absolute()
     for taxon in sorted(classifications.keys()):
         process_one_taxon(
             taxon,
@@ -75,8 +86,10 @@ def main():
             args.out_dir,
             args.threads,
             args.threshold,
+            args.chunks,
+            args.slurm_config,
+            tmp_dir,
         )
-    print()
 
 
 if __name__ == "__main__":

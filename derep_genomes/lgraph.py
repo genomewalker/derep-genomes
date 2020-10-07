@@ -9,6 +9,11 @@ import subprocess
 import pandas as pd
 from derep_genomes.general import get_open_func, get_assembly_length, get_contig_lengths
 import logging
+from pathlib import Path
+import os
+from itertools import product
+from simple_slurm import Slurm
+import yaml
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
@@ -171,22 +176,79 @@ def get_reps(graph, partition):
     return reps, subgraphs
 
 
-def dereplicate(acc_to_assemblies, threads, threshold):
+def save_chunks_to_disk(chunks, temp_dir):
+    wdir = os.path.join(temp_dir, "chunks")
+    Path(wdir).mkdir(parents=True, exist_ok=True)
+    file_chunks = {}
+    for i, assemblies in enumerate(chunks):
+        fname = os.path.join(wdir, "chunk_" + str(i))
+        with open(fname, "w") as outfile:
+            for assm in assemblies:
+                outfile.write("%s\n" % assm)
+        file_chunks[i] = fname
+    return file_chunks, wdir
+
+
+def create_slurm_commands(files, wdir):
+    file_list = list(product(files.keys(), files.keys()))
+    odir = os.path.join(wdir, "fastANI_out")
+    Path(odir).mkdir(parents=True, exist_ok=True)
+    cmds = []
+    ofiles = []
+    for file in file_list:
+        ofile = os.path.join(odir, "fastANI_out_" + str(file[0]) + "_" + str(file[1]))
+        cmd = " ".join(
+            ["fastANI", "--ql", files[file[0]], "--rl", files[file[1]], "-o", ofile]
+        )
+        cmds.append(cmd)
+        ofiles.append(ofile)
+    return cmds, ofiles, odir
+
+
+def run_slurm_jobs(cmds, ofiles, slurm_config, odir):
+    rfile = os.path.join(odir, "fastANI_out_jobs.txt")
+    with open(rfile, "w") as outfile:
+        for cmd in cmds:
+            outfile.write("%s\n" % cmd)
+
+    slurm = Slurm(**yaml.load(slurm_config, Loader=yaml.FullLoader))
+    slurm.set_array(range(len(cmds)))
+    slurm.add_arguments(wait="")
+
+    bjob = "$(awk -vJ=" + "$SLURM_ARRAY_TASK_ID " + "'NR==J' " + rfile + " )"
+    job_id = slurm.sbatch(bjob)
+
+    
+
+
+def dereplicate(acc_to_assemblies, threads, threshold, chunks, slurm_config, tmp_dir):
     """
     This function dereplicates genomes by Taxon by:
     1.
     """
     all_assemblies = sorted(acc_to_assemblies.values())
     derep_assemblies = []
-    with tempfile.TemporaryDirectory() as temp_dir:
+    with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
         # If
         if len(all_assemblies) <= 50:
             ani_results = pairwise_fastANI(
                 assemblies=all_assemblies, threads=threads, temp_dir=temp_dir
             )
         else:
-            
-            pass
+            n = math.ceil(len(all_assemblies) / chunks)
+            chunks = [
+                all_assemblies[i * n : (i + 1) * n]
+                for i in range((len(all_assemblies) + n - 1) // n)
+            ]
+            # save chunks to disk
+            files, wdir = save_chunks_to_disk(chunks, temp_dir)
+            # Create fastANI commands
+            cmds, ofiles, odir = create_slurm_commands(files, wdir)
+            # Run slurm array job
+            jobs = run_slurm_jobs(cmds, ofiles, slurm_config, odir)
+            exit(0)
+            # Collect results
+
         pairwise_distances = process_fastANI_results(ani_results)
         # Convert pw dist to graph
         M = nx.from_pandas_edgelist(

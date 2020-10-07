@@ -13,6 +13,13 @@ from derep_genomes import __version__
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
+# From: https://stackoverflow.com/a/11541450
+def is_valid_file(parser, arg):
+    if not os.path.exists(arg):
+        parser.error("The file %s does not exist!" % arg)
+    else:
+        return open(arg, "r")  # return an open file handle
+
 
 def get_arguments():
     parser = argparse.ArgumentParser(description="Cluster assemblies in each taxon")
@@ -23,6 +30,13 @@ def get_arguments():
         "out_dir",
         type=str,
         help="Directory where dereplicated assemblies will be copied",
+    )
+    parser.add_argument(
+        "--tmp",
+        type=str,
+        default="/tmp",
+        dest="tmp_dir",
+        help="Tmp directory where dereplicated assemblies will be copied",
     )
     parser.add_argument("tax_file", type=str, help="GTDB taxonomy file")
     parser.add_argument(
@@ -44,6 +58,15 @@ def get_arguments():
     )
     parser.add_argument(
         "-d", "--debug", action="store_true", help="print debug messages to stderr"
+    )
+    parser.add_argument(
+        "-s",
+        "--slurm_config",
+        dest="slurm_config",
+        required=False,
+        help="YAML configuration for slurm",
+        metavar="FILE",
+        type=lambda x: is_valid_file(parser, x),
     )
     parser.add_argument(
         "-v",
@@ -72,7 +95,9 @@ def load_classifications(tax_file):
 def find_all_assemblies(in_dir):
     print("\nLooking for files in {}:".format(in_dir))
     all_assemblies = [
-        str(x) for x in sorted(pathlib.Path(in_dir).glob("**/*")) if x.is_file()
+        str(x)
+        for x in sorted(pathlib.Path(in_dir).absolute().glob("**/*"))
+        if x.is_file()
     ]
     print("found {:,} files".format(len(all_assemblies)))
     return all_assemblies
