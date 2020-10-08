@@ -276,6 +276,7 @@ def dereplicate(
     tmp_dir,
     debug,
     max_jobs_array,
+    con,
 ):
     """
     This function dereplicates genomes by Taxon by:
@@ -381,11 +382,18 @@ def dereplicate(
                     derep_assemblies.append(candidate)
             else:
                 derep_assemblies = candidates
-    derep_assemblies = set(derep_assemblies)
+    derep_assemblies = list(set(derep_assemblies))
     logging.info(
         "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
     )
-    return derep_assemblies
+    results = (
+        w_filt,
+        len(set([partition[k] for k in partition])),
+        len(all_assemblies),
+        len(derep_assemblies),
+    )
+    rep_keys = [k for k in acc_to_assemblies if acc_to_assemblies[k] in reps]
+    return derep_assemblies, results, rep_keys
 
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):

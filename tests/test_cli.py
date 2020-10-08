@@ -1,5 +1,5 @@
-from derep_genomes import main
+import derep_genomes.__main__
 
 
 def test_main_template():
-    assert main.main() is None
+    assert derep_genomes.main() is None

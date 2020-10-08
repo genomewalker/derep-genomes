@@ -97,6 +97,8 @@ def get_arguments():
     args = parser.parse_args()
     return args
 
+def create_jobs_db(db, path):
+    pass
 
 def load_classifications(tax_file):
     classifications = collections.defaultdict(list)
