@@ -348,7 +348,10 @@ def dereplicate(
             g=G, low=0, high=len(weights) - 1, weights=weights, debug=debug
         )
 
-        logging.info("Finding genome representative using Louvain")
+        logging.info(
+            "Finding genome representatives using Louvain + eigenvector centrality"
+        )
+
         partition = community_louvain.best_partition(G_filt, resolution=1.0)
 
         logging.info(
