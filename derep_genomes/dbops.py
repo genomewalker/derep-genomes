@@ -18,12 +18,12 @@ def _path_to_uri(path):
 def check_if_db_exists(db):
     uri = _path_to_uri(db) + "?mode=rw"
     try:
-        con = sqlite3.connect(uri, uri=True)
+        con = sqlite3.connect(uri, uri=True, isolation_level="EXCLUSIVE")
         logging.info("Found DB in {}".format(db))
 
     except sqlite3.OperationalError:
         logging.info("DB not found. Creating it")
-        con = sqlite3.connect(db)
+        con = sqlite3.connect(db, isolation_level="EXCLUSIVE")
     return con
 
 

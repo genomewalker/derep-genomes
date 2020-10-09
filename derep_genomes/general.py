@@ -8,6 +8,7 @@ import pathlib
 import collections
 import textwrap
 import logging
+from contextlib import contextmanager
 
 from derep_genomes import __version__
 
@@ -69,6 +70,13 @@ def get_arguments():
         "-d", "--debug", action="store_true", help="print debug messages to stderr"
     )
     parser.add_argument(
+        "--db",
+        dest="db",
+        type=str,
+        default="derep-genomes.db",
+        help="SQLite3 DB to store the results",
+    )
+    parser.add_argument(
         "-s",
         "--slurm_config",
         dest="slurm_config",
@@ -97,8 +105,10 @@ def get_arguments():
     args = parser.parse_args()
     return args
 
+
 def create_jobs_db(db, path):
     pass
+
 
 def load_classifications(tax_file):
     classifications = collections.defaultdict(list)
@@ -128,7 +138,6 @@ def find_assemblies_for_accessions(accessions, all_assemblies):
     acc_to_assemblies = {}
     found_count, total_count = 0, 0
     not_found = []
-
     for accession in accessions:
         total_count += 1
         assembly_filename = get_assembly_filename(accession, all_assemblies)
@@ -137,16 +146,15 @@ def find_assemblies_for_accessions(accessions, all_assemblies):
             acc_to_assemblies[accession] = assembly_filename
         else:
             not_found.append(accession)
-        import time
 
-    logging.info("Found {}/{} assemblies".format(found_count, total_count))
+    # logging.info("Found {}/{} assemblies".format(found_count, total_count))
 
-    if not_found:
-        logging.info("Failed to find assemblies for the following accessions:")
-        wrapper = textwrap.TextWrapper(
-            initial_indent="    ", subsequent_indent="    ", width=100
-        )
-        logging.info(wrapper.fill(", ".join(not_found)))
+    # if not_found:
+    #     logging.info("Failed to find assemblies for the following accessions:")
+    #     wrapper = textwrap.TextWrapper(
+    #         initial_indent="    ", subsequent_indent="    ", width=100
+    #     )
+    #     logging.info(wrapper.fill(", ".join(not_found)))
 
     return acc_to_assemblies
 
@@ -230,3 +238,14 @@ def get_contig_lengths(filename):
         if name:
             lengths.append(len(sequence))
     return lengths
+
+
+@contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout = sys.stdout
+        sys.stdout = devnull
+        try:
+            yield
+        finally:
+            sys.stdout = old_stdout
