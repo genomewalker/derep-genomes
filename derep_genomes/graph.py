@@ -253,7 +253,7 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
     return job_ids
 
 
-def reduce_slurm_jobs(ofiles, threads, debug):
+def reduce_slurm_jobs(ofiles, threads):
     if debug is True:
         dfs = list(map(process_fastANI_results, ofiles))
     else:
@@ -268,13 +268,13 @@ def reduce_slurm_jobs(ofiles, threads, debug):
 
 
 def dereplicate(
-    acc_to_assemblies,
+    all_assemblies,
+    out_dir,
     threads,
     threshold,
     chunks,
     slurm_config,
     tmp_dir,
-    debug,
     max_jobs_array,
     con,
 ):
@@ -284,26 +284,26 @@ def dereplicate(
     2. Dynamically filters the ANI graph
     3.
     """
-    all_assemblies = sorted(acc_to_assemblies.values())
     derep_assemblies = []
+    n_assemblies = all_assemblies.shape[0]
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
 
-        if len(all_assemblies) <= 20 or slurm_config is None:
-            if (len(all_assemblies) * len(all_assemblies)) < threads:
-                threads = len(all_assemblies) * len(all_assemblies)
+        if n_assemblies <= 10 or slurm_config is None:
+            if (n_assemblies * n_assemblies) < threads:
+                threads = n_assemblies * n_assemblies
             logging.info(
                 "Found {} assemblies, using default fastANI with {} threads".format(
-                    len(all_assemblies), threads
+                    n_assemblies, threads
                 )
             )
             ani_results = pairwise_fastANI(
-                assemblies=all_assemblies, threads=threads, temp_dir=temp_dir
+                assemblies=all_assemblies["assemblies"].tolist(), threads=threads, temp_dir=temp_dir
             )
             logging.info("Processing ANI results")
             pairwise_distances = process_fastANI_results(ani_results)
         else:
             n = chunks
-            chunks = split_fixed_size(all_assemblies, n)
+            chunks = split_fixed_size(all_assemblies["assemblies"].tolist(), n)
             # chunks = [
             #     all_assemblies[i * n : (i + 1) * n]
             #     for i in range((len(all_assemblies) + n - 1) // n)
@@ -322,7 +322,7 @@ def dereplicate(
                 cmds, ofiles, slurm_config, odir, max_jobs_array
             )
             logging.info("Reducing SLURM jobs and processing ANI results")
-            pairwise_distances = reduce_slurm_jobs(ofiles, threads, debug)
+            pairwise_distances = reduce_slurm_jobs(ofiles, threads)
         # Convert pw dist to graph
         logging.info("Generating ANI graph")
         M = nx.from_pandas_edgelist(

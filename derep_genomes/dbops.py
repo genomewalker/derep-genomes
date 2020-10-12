@@ -41,19 +41,40 @@ def create_db_tables(con):
     This function creates the tables needed to stores results and resuming failed jobs or updating new data
     """
     tax_table = "CREATE TABLE taxa(taxon TEXT PRIMARY KEY)"
+    tax_table_idx = "CREATE INDEX idx_taxa_taxon ON taxa (taxon);"
+
     genomes_table = "CREATE TABLE genomes(taxon TEXT, accession TEXT PRIMARY KEY)"
-    derep_genomes_table = (
+    genomes_table_idx = "CREATE INDEX idx_genomes_taxon ON genomes (taxon);"
+
+    genomes_derep_table = (
         "CREATE TABLE genomes_derep(accession TEXT PRIMARY KEY, representative INTEGER)"
     )
+    genomes_derep_table_idx = (
+        "CREATE INDEX idx_genomes_derep_acc ON genomes_derep (accession);"
+    )
+
     results_table = "CREATE TABLE results(taxon TEXT PRIMARY KEY, weight REAL, communities INTEGER, n_genomes INTEGER, n_genomes_derep INTEGER)"
+    results_table_idx = "CREATE INDEX idx_results_taxon ON results (taxon);"
+
     jobs_done_table = (
         "CREATE TABLE jobs_done(taxon TEXT, accession TEXT PRIMARY KEY, file TEXT)"
     )
+    jobs_done_table_idx = "CREATE INDEX idx_jobs_done_taxon ON jobs_done (taxon);"
+
+    # Create tables
     con.execute(tax_table)
     con.execute(genomes_table)
-    con.execute(derep_genomes_table)
+    con.execute(genomes_derep_table)
     con.execute(results_table)
     con.execute(jobs_done_table)
+
+    # Create indices
+    con.execute(tax_table_idx)
+    con.execute(genomes_table_idx)
+    con.execute(genomes_derep_table_idx)
+    con.execute(results_table_idx)
+    con.execute(jobs_done_table_idx)
+
     try:
         con.commit()
     except:

@@ -13,24 +13,32 @@ from contextlib import contextmanager
 from derep_genomes import __version__
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+COPY = False
 
 # From: https://stackoverflow.com/a/11541450
 def is_valid_file(parser, arg):
     if not os.path.exists(arg):
-        parser.error("The file %s does not exist!" % arg)
+        if os.path.isfile(arg):
+            parser.error("The file %s does not exist!" % arg)
+        else:
+            parser.error("The directory %s does not exist!" % arg)
     else:
-        return open(arg, "r")  # return an open file handle
+        if os.path.isfile(arg):
+            return open(arg, "r")  # return an open file handle
+        else:
+            return arg
 
 
 def get_arguments():
+
     parser = argparse.ArgumentParser(description="Cluster assemblies in each taxon")
     parser.add_argument(
-        "in_dir", type=str, help="Directory containing all GTDB assemblies"
-    )
-    parser.add_argument(
-        "out_dir",
-        type=str,
-        help="Directory where dereplicated assemblies will be copied",
+        "--in-dir",
+        dest="in_dir",
+        required=True,
+        metavar="DIR",
+        type=lambda x: is_valid_file(parser, x),
+        help="Directory containing all GTDB assemblies",
     )
     parser.add_argument(
         "--tmp",
@@ -39,7 +47,14 @@ def get_arguments():
         dest="tmp_dir",
         help="Tmp directory where dereplicated assemblies will be copied",
     )
-    parser.add_argument("tax_file", type=str, help="GTDB taxonomy file")
+    parser.add_argument(
+        "--taxa",
+        required=True,
+        metavar="FILE",
+        type=lambda x: is_valid_file(parser, x),
+        dest="tax_file",
+        help="GTDB taxonomy file",
+    )
     parser.add_argument(
         "-t",
         "--threshold",
@@ -87,14 +102,25 @@ def get_arguments():
     )
 
     parser.add_argument(
-        "--taxa",
+        "--selected-taxa",
         dest="selected_taxa",
         required=False,
         help="File with selected taxa. Taxa should have the following formar: d__;p__;c__;o__;f__;g__;s__",
         metavar="FILE",
         type=lambda x: is_valid_file(parser, x),
     )
-
+    parser.add_argument(
+        "--copy",
+        action="store_true",
+        required="--out-dir" in " ".join(sys.argv),
+    )
+    parser.add_argument(
+        "--out-dir",
+        dest="out_dir",
+        type=str,
+        required="--copy" in " ".join(sys.argv),
+        help="Directory where dereplicated assemblies will be copied",
+    )
     parser.add_argument(
         "-v",
         "--version",
@@ -109,17 +135,15 @@ def get_arguments():
 def create_jobs_db(db, path):
     pass
 
-
 def load_classifications(tax_file):
     classifications = collections.defaultdict(list)
-    with open(tax_file, "rt") as tax:
-        for line in tax:
-            parts = line.strip().split("\t")
-            accession = parts[0]
-            if accession.startswith("RS_") or accession.startswith("GB_"):
-                accession = accession[3:]
-            taxon = parts[1]
-            classifications[taxon].append(accession)
+    for line in tax_file:
+        parts = line.strip().split("\t")
+        accession = parts[0]
+        if accession.startswith("RS_") or accession.startswith("GB_"):
+            accession = accession[3:]
+        taxon = parts[1]
+        classifications[taxon].append(accession)
     return classifications
 
 

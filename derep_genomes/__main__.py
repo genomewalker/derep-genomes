@@ -53,6 +53,10 @@ import tqdm
 from functools import partial
 import pandas as pd
 
+
+COPY = False
+DEBUG = False
+
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
 
@@ -87,51 +91,13 @@ def process_one_taxon(
 
     if len(acc_to_assemblies) == 0:
         return
-    if len(acc_to_assemblies) == 1:
-        rep = str(next(iter(acc_to_assemblies.keys())))
-        only_assembly = list(acc_to_assemblies.values())[0]
-
-        logging.info("Only one assembly for this species, copying to output directory:")
-        if debug:
-            print("{} -> {}".format(only_assembly, out_dir))
-        shutil.copy(only_assembly, out_dir)
-        # add taxa
-        # add accessions
-        # add results
-        # add job done
-
-        logging.info("Saving data in DB")
-        db_insert_taxa(con=con, taxon=classification)
-        db_insert_genomes(con=con, taxon=classification, acc2assm=acc_to_assemblies)
-        db_insert_genomes_derep(
-            con=con, acc2assm=acc_to_assemblies, assms=only_assembly, reps=rep
-        )
-        db_insert_results(
-            con=con,
-            taxon=classification,
-            weight=0,
-            communities=1,
-            n_genomes=1,
-            n_genomes_derep=1,
-        )
-        db_insert_job_done(
-            con=con,
-            taxon=classification,
-            acc2assm=acc_to_assemblies,
-            assms=only_assembly,
-        )
-        try:
-            con.commit()
-        except:
-            pass
-        logging.info("Dereplication complete. Job saved in DB")
-
     else:
         logging.info(
             "{:,} assemblies for this species, clustering to dereplicate.".format(
                 len(acc_to_assemblies)
             )
         )
+
         derep_assemblies, results, reps = dereplicate(
             acc_to_assemblies,
             threads,
@@ -176,76 +142,101 @@ def process_one_taxon(
         logging.info("Dereplication complete. Job saved in DB")
 
 
-def get_singletons(classifications):
-    singletons = [k for k, v in classifications.items() if len(v) == 1]
-    no_singletons = {k: v for k, v in classifications.items() if len(v) > 1}
-    no_singletons = [
-        k
-        for k, v in sorted(
-            no_singletons.items(), key=lambda item: len(item[1]), reverse=False
-        )
-    ]
-    return list(set(singletons)), list(set(no_singletons))
+def copy_files(src_dst):
+    shutil.copy(src_dst[0], src_dst[1])
 
 
-def process_one_taxon_par(x, classifications, all_assemblies, out_dir, debug):
-
-    accessions = sorted(classifications[x])
-    acc_to_assemblies = find_assemblies_for_accessions(accessions, all_assemblies)
-
-    rep = str(next(iter(acc_to_assemblies.keys())))
-    only_assembly = list(acc_to_assemblies.values())[0]
-    os.symlink(only_assembly, os.path.join(out_dir, os.path.basename(only_assembly)))
-    # shutil.copy(only_assembly, out_dir)
-    # add taxa
-    # add accessions
-    # add results
-    # add job done
-    res = {}
-    res["taxa"] = {"taxon": x}
-    res["genomes"] = {"taxon": x, "acc2assm": acc_to_assemblies}
-    res["genomes_derep"] = {
-        "acc2assm": acc_to_assemblies,
-        "assms": only_assembly,
-        "reps": rep,
-    }
-    res["results"] = {
-        "taxon": x,
-        "weight": None,
-        "communities": 1,
-        "n_genomes": 1,
-        "n_genomes_derep": 1,
-    }
-    res["job_done"] = {
-        "taxon": x,
-        "acc2assm": acc_to_assemblies,
-        "assms": only_assembly,
-    }
-    return res
+def symlink_files(src, dst):
+    os.symlink(src, os.path.join(dst, os.path.basename(src)))
 
 
-def process_sigletons(
-    singletons, classifications, all_assemblies, out_dir, threads, debug
-):
+def check_existing(df, columns, table, con):
+    query = "SELECT " + ",".join(columns) + " from " + table
 
-    func = partial(
-        process_one_taxon_par,
-        classifications=classifications,
-        all_assemblies=all_assemblies,
-        out_dir=out_dir,
-        debug=debug,
-    )
+    old = pd.read_sql_query(query, con)
+    new = df.loc[:, columns]
+    old = old.loc[:, columns]
 
-    if debug is True:
-        results = list(map(func, singletons))
+    df = pd.concat([new, old]).drop_duplicates(keep=False)
+    return df
+
+
+def insert_pd_sql(query, table, con):
+    if query.empty:
+        logging.info("All entries in table {} already present".format(table))
     else:
-        with suppress_stdout():
-            p = ThreadPool(threads)
-            results = list(
-                tqdm.tqdm(p.imap_unordered(func, singletons), total=len(singletons))
+        logging.info("Adding {} entries in table {}".format(query.shape[0], table))
+        query.to_sql(name=table, con=con, if_exists="append", index=False)
+
+
+def process_sigletons(singletons, out_dir, threads, con):
+
+    # Insert data to table taxa
+    query = check_existing(singletons, columns=["taxon"], table="taxa", con=con)
+    insert_pd_sql(query=query, table="taxa", con=con)
+
+    # Insert data to table taxa
+    query = check_existing(
+        singletons, columns=["taxon", "accession"], table="genomes", con=con
+    )
+    genomes_derep = insert_pd_sql(query=query, table="genomes", con=con)
+
+    # Insert data to table genomes_derep
+    singletons.loc[:, "representative"] = int(1)
+
+    query = check_existing(
+        singletons,
+        columns=["accession", "representative"],
+        table="genomes_derep",
+        con=con,
+    )
+    genomes = insert_pd_sql(query=query, table="genomes_derep", con=con)
+
+    # Insert data to table results
+    singletons.loc[:, "weight"] = None
+    singletons.loc[:, "communities"] = int(1)
+    singletons.loc[:, "n_genomes"] = 1
+    singletons.loc[:, "n_genomes_derep"] = 1
+
+    query = check_existing(
+        singletons,
+        columns=["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"],
+        table="results",
+        con=con,
+    )
+    results = insert_pd_sql(query=query, table="results", con=con)
+    # Insert data to table jobs_done
+    singletons.loc[:, "file"] = singletons["assembly"].apply(
+        lambda x: os.path.basename(x)
+    )
+    query = check_existing(
+        singletons, columns=["taxon", "accession", "file"], table="jobs_done", con=con
+    )
+    jobs_done = insert_pd_sql(query=query, table="jobs_done", con=con)
+
+    try:
+        con.commit()
+    except:
+        pass
+
+    if COPY:
+        logging.info(
+            "Copying {} files with singletons to {}".format(
+                singletons.shape[0], out_dir
             )
-    print(results[0])
-    exit(0)
+        )
+        files = pd.DataFrame()
+        files.loc[:, "src"] = singletons.loc[:, "assembly"]
+        files.loc[:, "dst"] = out_dir
+        files = list(files.itertuples(index=False, name=None))
+
+        if DEBUG:
+            files = list(map(copy_files, files))
+        else:
+            p = Pool(threads)
+            files = list(
+                tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
+            )
 
 
 def find_assemblies(x, classifications, all_assm, debug):
@@ -273,9 +264,16 @@ def get_accession(assembly):
 
 
 def main():
+    global COPY
+    global DEBUG
     args = get_arguments()
-    out_dir = pathlib.Path(args.out_dir).absolute()
-    os.makedirs(out_dir, exist_ok=True)
+
+    COPY = args.copy
+    DEBUG = args.debug
+
+    if COPY:
+        out_dir = pathlib.Path(args.out_dir).absolute()
+        os.makedirs(out_dir, exist_ok=True)
 
     tmp_dir = pathlib.Path(args.tmp_dir).absolute()
 
@@ -308,45 +306,70 @@ def main():
     if args.selected_taxa:
         with args.selected_taxa as f:
             taxas = [line.rstrip() for line in f]
-        classifications = {k: classifications[k] for k in taxas if k in classifications}
-    logging.info("Extracting singletons...")
+        assm_data_done = assm_data[assm_data["taxon"].isin(taxas)]
+        assm_data = assm_data[~assm_data["taxon"].isin(taxas)]
+
+    logging.info("Finding singletons...")
     taxon_counts = assm_data.groupby("taxon", as_index=False)["taxon"].agg(
         {"count": "count"}
     )
 
-    classification_singletons = taxon_counts[taxon_counts["count"] == 1][
+    classification_singletons = taxon_counts[taxon_counts["count"] < 2][
         "taxon"
     ].tolist()
-
+    classification_singletons = assm_data[
+        assm_data["taxon"].isin(classification_singletons)
+    ].reset_index(drop=True)
     classifications_sorted = taxon_counts[taxon_counts["count"] > 1]["taxon"].tolist()
-    print(len(classifications_sorted))
-    exit(0)
+    classifications_sorted = assm_data[
+        assm_data["taxon"].isin(classifications_sorted)
+    ].reset_index(drop=True)
     logging.info("Processing singletons")
     process_sigletons(
         singletons=classification_singletons,
-        classifications=classifications,
-        all_assemblies=all_assemblies,
-        out_dir=out_dir,
+        out_dir=args.out_dir,
         threads=args.threads,
-        debug=args.debug,
+        con=con,
     )
 
-    exit(0)
-    for taxon in classifications_sorted:
-        process_one_taxon(
-            classification=taxon,
-            accessions=classifications[taxon],
-            all_assemblies=all_assemblies,
-            out_dir=out_dir,
-            threads=args.threads,
-            threshold=args.threshold,
-            chunks=args.chunks,
-            slurm_config=args.slurm_config,
-            tmp_dir=tmp_dir,
-            debug=args.debug,
-            max_jobs_array=args.max_jobs_array,
-            con=con,
-        )
+    # derep_assemblies, results, reps = dereplicate(
+    #     acc_to_assemblies,
+    #     threads,
+    #     threshold,
+    #     chunks,
+    #     slurm_config,
+    #     tmp_dir,
+    #     debug,
+    #     max_jobs_array,
+    #     con,
+    # )
+
+    classifications_sorted.groupby("taxon").apply(
+        dereplicate,
+        out_dir=args.out_dir,
+        threads=args.threads,
+        threshold=args.threshold,
+        chunks=args.chunks,
+        slurm_config=args.slurm_config,
+        tmp_dir=tmp_dir,
+        max_jobs_array=args.max_jobs_array,
+        con=con,
+    )
+
+    # for taxon in classifications_sorted:
+    #     process_one_taxon(
+    #         classification=taxon,
+    #         accessions=classifications[taxon],
+    #         out_dir=out_dir,
+    #         threads=args.threads,
+    #         threshold=args.threshold,
+    #         chunks=args.chunks,
+    #         slurm_config=args.slurm_config,
+    #         tmp_dir=tmp_dir,
+    #         debug=args.debug,
+    #         max_jobs_array=args.max_jobs_array,
+    #         con=con,
+    #     )
     con.close()
 
 
