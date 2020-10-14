@@ -14,6 +14,7 @@ from derep_genomes import __version__
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 COPY = False
+DEBUG = False
 
 # From: https://stackoverflow.com/a/11541450
 def is_valid_file(parser, arg):
@@ -129,11 +130,18 @@ def get_arguments():
         help="print debug messages to stderr",
     )
     args = parser.parse_args()
+
+    global COPY
+    global DEBUG
+    COPY = args.copy
+    DEBUG = args.debug
+
     return args
 
 
 def create_jobs_db(db, path):
     pass
+
 
 def load_classifications(tax_file):
     classifications = collections.defaultdict(list)
@@ -154,7 +162,7 @@ def find_all_assemblies(in_dir):
         for x in sorted(pathlib.Path(in_dir).absolute().glob("**/*"))
         if x.is_file()
     ]
-    logging.info("Found {} files in {}".format(len(all_assemblies), in_dir))
+    logging.info("Found {:,} files in {}".format(len(all_assemblies), in_dir))
     return all_assemblies
 
 

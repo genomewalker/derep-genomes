@@ -7,7 +7,13 @@ import pandas as pd
 from scipy import stats
 import subprocess
 import pandas as pd
-from derep_genomes.general import get_open_func, get_assembly_length, get_contig_lengths
+from derep_genomes.general import (
+    get_open_func,
+    get_assembly_length,
+    get_contig_lengths,
+    DEBUG,
+    COPY,
+)
 import logging
 from pathlib import Path
 import os
@@ -65,7 +71,7 @@ def process_fastANI_results(rfile):
     return df
 
 
-def binary_search_filter(g, low, high, weights, debug):
+def binary_search_filter(g, low, high, weights):
     """
     This functions filters a graph by finding the smallest weight where
     the graph gets disconnected.
@@ -83,7 +89,7 @@ def binary_search_filter(g, low, high, weights, debug):
             if float(d["weight"]) <= float(weights[mid])
         ]
         x.remove_edges_from(edges2rm)
-        if debug:
+        if DEBUG:
             logging.info(
                 "Filtering -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
                     low,
@@ -102,7 +108,7 @@ def binary_search_filter(g, low, high, weights, debug):
                 if float(d["weight"]) <= float(weights[mid])
             ]
             x.remove_edges_from(edges2rm)
-            if debug:
+            if DEBUG:
                 logging.info(
                     "Final -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
                         low,
@@ -128,7 +134,7 @@ def binary_search_filter(g, low, high, weights, debug):
                 if float(d["weight"]) <= float(weights[mid + 1])
             ]
             x.remove_edges_from(edges2rm)
-            if debug:
+            if DEBUG:
                 logging.info(
                     "low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
                         low,
@@ -254,7 +260,7 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
 
 
 def reduce_slurm_jobs(ofiles, threads):
-    if debug is True:
+    if DEBUG:
         dfs = list(map(process_fastANI_results, ofiles))
     else:
         p = Pool(threads)
@@ -269,14 +275,12 @@ def reduce_slurm_jobs(ofiles, threads):
 
 def dereplicate(
     all_assemblies,
-    out_dir,
     threads,
     threshold,
     chunks,
     slurm_config,
     tmp_dir,
     max_jobs_array,
-    con,
 ):
     """
     This function dereplicates genomes by Taxon by:
@@ -297,7 +301,9 @@ def dereplicate(
                 )
             )
             ani_results = pairwise_fastANI(
-                assemblies=all_assemblies["assemblies"].tolist(), threads=threads, temp_dir=temp_dir
+                assemblies=all_assemblies["assembly"].tolist(),
+                threads=threads,
+                temp_dir=temp_dir,
             )
             logging.info("Processing ANI results")
             pairwise_distances = process_fastANI_results(ani_results)
@@ -346,7 +352,7 @@ def dereplicate(
         weights = sorted(set(weights))
         logging.info("Filtering ANI graph")
         G_filt, w_filt = binary_search_filter(
-            g=G, low=0, high=len(weights) - 1, weights=weights, debug=debug
+            g=G, low=0, high=len(weights) - 1, weights=weights
         )
 
         logging.info(
@@ -383,17 +389,31 @@ def dereplicate(
             else:
                 derep_assemblies = candidates
     derep_assemblies = list(set(derep_assemblies))
+
     logging.info(
         "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
     )
-    results = (
-        w_filt,
-        len(set([partition[k] for k in partition])),
-        len(all_assemblies),
-        len(derep_assemblies),
+    results = pd.DataFrame(
+        [
+            (
+                w_filt,
+                len(set([partition[k] for k in partition])),
+                len(all_assemblies),
+                len(derep_assemblies),
+            )
+        ],
+        columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
     )
-    rep_keys = [k for k in acc_to_assemblies if acc_to_assemblies[k] in reps]
-    return derep_assemblies, results, rep_keys
+
+    rep_keys = all_assemblies[all_assemblies["assembly"].isin(reps)][
+        "accession"
+    ].tolist()
+    all_assemblies = all_assemblies[all_assemblies["assembly"].isin(derep_assemblies)]
+
+    all_assemblies.loc[:, "representative"] = 0
+    all_assemblies.loc[all_assemblies["accession"].isin(rep_keys), "representative"] = 1
+
+    return all_assemblies, results
 
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):

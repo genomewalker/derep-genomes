@@ -4,8 +4,17 @@ import urllib.parse
 import logging
 import os
 from pathlib import Path
+import pandas as pd
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+
+tables = [
+    "taxa",
+    "genomes",
+    "genomes_derep",
+    "results",
+    "jobs_done",
+]
 
 
 def _path_to_uri(path):
@@ -87,13 +96,13 @@ def check_db_tables(con):
     """
     cursor = con.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-    tables = [
-        "taxa",
-        "genomes",
-        "genomes_derep",
-        "results",
-        "jobs_done",
-    ]
+    # tables = [
+    #     "taxa",
+    #     "genomes",
+    #     "genomes_derep",
+    #     "results",
+    #     "jobs_done",
+    # ]
     db_tables = cursor.fetchall()
     db_tables = [table[0] for table in db_tables]
     if set(tables) != set(db_tables):
@@ -175,62 +184,69 @@ def db_insert_job_done(con, taxon, acc2assm, assms):
         cursor.execute(query, (taxon, assembly, os.path.basename(acc2assm[assembly])))
 
 
-def check_if_done(con, taxon, acc2assm, out_dir):
+def check_if_done(con, taxon, acc2assm):
     # Find if taxon is in jobs done and taxa processed
-    jobs_done, files_done = retrieve_jobs_done(con, taxon)
+    jobs_done = retrieve_jobs_done(con, taxon)
     genomes_done = retrieve_taxa_analyzed(con, taxon)
-    # genomes_derep_done = retrieve_taxa_derep(con, taxon)
-    # results_done = retrieve_results_done(con, taxon)
-    if jobs_done and genomes_done:
-        # check that there are no updates
-        needs_update = check_if_updates(genomes_done, acc2assm)
-        if needs_update:
-            return False
-        # Check files are in the folder
-        all_files_exist = not check_done_files_exists(files_done, out_dir)
-        if all_files_exist:
+
+    if (jobs_done is not None) and (genomes_done is not None):
+        if not jobs_done.empty and not genomes_done.empty:
+            # check that there are no updates
+            jobs_done = jobs_done.merge(genomes_done).loc[:, ["accession", "file"]]
+            acc2assm.loc[:, "file"] = acc2assm["assembly"].apply(os.path.basename)
+
+            needs_update = check_if_updates(
+                jobs_done, acc2assm.loc[:, ["accession", "file"]]
+            )
+            if needs_update:
+                remove_entries(taxon, tables, con)
+                return False
+            # Check files are in the folder
+            # all_files_exist = not check_done_files_exists(files_done, out_dir)
+            # if all_files_exist:
+            #     return False
+        else:
             return False
     else:
         return False
-
     return True
+
+
+def remove_entries(taxon, tables, con):
+    pass
 
 
 def retrieve_jobs_done(con, taxon):
     query = "SELECT * from jobs_done where taxon =?"
-    cursor = con.cursor()
-    cursor.execute(query, (taxon,))
-    jobs = cursor.fetchall()
-    if jobs:
-        accessions = [str(k[1]) for k in jobs]
-        files = [str(k[2]) for k in jobs]
-        return {taxon: accessions}, {taxon: files}
-    else:
-        return None, None
+    jobs = pd.read_sql(query, con, params=(taxon,))
 
-
-def retrieve_taxa_analyzed(con, taxon):
-    query = "SELECT * from genomes where taxon =?"
-    cursor = con.cursor()
-    cursor.execute(query, (taxon,))
-    jobs = cursor.fetchall()
-    if jobs:
-        accessions = [str(k[1]) for k in jobs]
-        return {taxon: accessions}
+    if not jobs.empty:
+        return jobs
     else:
         return None
 
 
 def retrieve_taxa_analyzed(con, taxon):
     query = "SELECT * from genomes where taxon =?"
-    cursor = con.cursor()
-    cursor.execute(query, (taxon,))
-    jobs = cursor.fetchall()
-    if jobs:
-        accessions = [str(k[1]) for k in jobs]
-        return {taxon: accessions}
+    taxons = pd.read_sql(query, con, params=(taxon,))
+
+    if not taxons.empty:
+        # accessions = [str(k[1]) for k in jobs]
+        return taxons
     else:
         return None
+
+
+# def retrieve_taxa_analyzed(con, taxon):
+#     query = "SELECT * from genomes where taxon =?"
+#     cursor = con.cursor()
+#     cursor.execute(query, (taxon,))
+#     jobs = cursor.fetchall()
+#     if jobs:
+#         accessions = [str(k[1]) for k in jobs]
+#         return {taxon: accessions}
+#     else:
+#         return None
 
 
 def retrieve_results_done(con, taxon):
@@ -244,8 +260,9 @@ def retrieve_results_done(con, taxon):
         return False
 
 
-def check_if_updates(genomes_done, acc2assm):
-    if set(next(iter(acc2assm.keys()))) == set(next(iter(genomes_done.values()))):
+def check_if_updates(old, new):
+    df = pd.concat([new, old, old]).drop_duplicates(keep=False)
+    if not df.empty:
         return True
     else:
         return False

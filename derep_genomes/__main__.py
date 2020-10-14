@@ -30,6 +30,8 @@ from derep_genomes.general import (
     find_assemblies_for_accessions,
     suppress_stdout,
     get_assembly_filename,
+    COPY,
+    DEBUG,
 )
 from derep_genomes.graph import dereplicate
 import logging
@@ -54,91 +56,128 @@ from functools import partial
 import pandas as pd
 
 
-COPY = False
-DEBUG = False
-
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
 
 def process_one_taxon(
+    taxon,
     classification,
-    accessions,
-    all_assemblies,
     out_dir,
     threads,
     threshold,
     chunks,
     slurm_config,
     tmp_dir,
-    debug,
     max_jobs_array,
     con,
 ):
-    accessions = sorted(accessions)
-    print()
-    logging.info("Dereplicating {}".format(classification))
-    acc_to_assemblies = find_assemblies_for_accessions(accessions, all_assemblies)
+    logging.info("Dereplicating {}".format(taxon))
+    classification = classification[classification["taxon"] == taxon]
 
+    acc_to_assemblies = classification.loc[:, ["accession", "assembly"]]
+    n_assemblies = classification.shape[0]
     # check if already processed
     logging.info("Retrieving jobs done")
-    is_done = check_if_done(
-        con=con, taxon=classification, acc2assm=acc_to_assemblies, out_dir=out_dir
-    )
+    is_done = check_if_done(con=con, taxon=taxon, acc2assm=acc_to_assemblies)
 
     if is_done:
         logging.info("Taxon already processed")
         return
 
-    if len(acc_to_assemblies) == 0:
+    if n_assemblies == 0:
         return
     else:
         logging.info(
             "{:,} assemblies for this species, clustering to dereplicate.".format(
-                len(acc_to_assemblies)
+                n_assemblies
             )
         )
 
-        derep_assemblies, results, reps = dereplicate(
-            acc_to_assemblies,
-            threads,
-            threshold,
-            chunks,
-            slurm_config,
-            tmp_dir,
-            debug,
-            max_jobs_array,
-            con,
+        derep_assemblies, results = dereplicate(
+            all_assemblies=acc_to_assemblies,
+            threads=threads,
+            threshold=threshold,
+            chunks=chunks,
+            slurm_config=slurm_config,
+            tmp_dir=tmp_dir,
+            max_jobs_array=max_jobs_array,
         )
-        logging.info("Copying dereplicated assemblies to output directory")
-        for assembly in derep_assemblies:
-            if debug:
-                print("{} -> {}".format(assembly, out_dir))
-            shutil.copy(assembly, out_dir)
 
         logging.info("Saving data in DB")
-        db_insert_taxa(con=con, taxon=classification)
-        db_insert_genomes(con=con, taxon=classification, acc2assm=acc_to_assemblies)
-        db_insert_genomes_derep(
-            con=con, acc2assm=acc_to_assemblies, assms=derep_assemblies, reps=reps
+
+        # Add taxa to taxa table
+        derep_assemblies.loc[:, "taxon"] = taxon
+        derep_assemblies.loc[:, "file"] = derep_assemblies["assembly"].apply(
+            os.path.basename
         )
-        db_insert_results(
+
+        results.loc[:, "taxon"] = taxon
+
+        query = check_existing(
+            df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
+            columns=["taxon"],
+            table="taxa",
             con=con,
-            taxon=classification,
-            weight=results[0],
-            communities=results[1],
-            n_genomes=results[2],
-            n_genomes_derep=results[3],
         )
-        db_insert_job_done(
+        insert_pd_sql(query=query, table="taxa", con=con)
+        # Add genomes to genome table
+        query = check_existing(
+            df=derep_assemblies.loc[:, ["taxon", "accession"]],
+            columns=["taxon", "accession"],
+            table="genomes",
             con=con,
-            taxon=classification,
-            acc2assm=acc_to_assemblies,
-            assms=derep_assemblies,
         )
+        genomes = insert_pd_sql(query=query, table="genomes", con=con)
+
+        # Add derep genomes to derep genome table
+        query = check_existing(
+            derep_assemblies.loc[:, ["accession", "representative"]],
+            columns=["accession", "representative"],
+            table="genomes_derep",
+            con=con,
+        )
+        genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
+
+        # Add results to results table
+        query = check_existing(
+            results.loc[
+                :, ["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"]
+            ],
+            columns=["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"],
+            table="results",
+            con=con,
+        )
+        results_db = insert_pd_sql(query=query, table="results", con=con)
+
+        # Add jobs done to table
+        query = check_existing(
+            derep_assemblies.loc[:, ["taxon", "accession", "file"]],
+            columns=["taxon", "accession", "file"],
+            table="jobs_done",
+            con=con,
+        )
+        jobs_done_db = insert_pd_sql(query=query, table="jobs_done", con=con)
+
         try:
             con.commit()
         except:
             pass
+        logging.info("Copying dereplicated assemblies to output directory")
+        for assembly in derep_assemblies:
+            if DEBUG:
+                print("{} -> {}".format(assembly, out_dir))
+            if COPY:
+                files = pd.DataFrame()
+                files.loc[:, "src"] = derep_assemblies.loc[:, "assembly"]
+                files.loc[:, "dst"] = out_dir
+                files = list(files.itertuples(index=False, name=None))
+                if DEBUG:
+                    files = list(map(copy_files, files))
+                else:
+                    p = Pool(threads)
+                    files = list(
+                        tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
+                    )
         logging.info("Dereplication complete. Job saved in DB")
 
 
@@ -157,7 +196,7 @@ def check_existing(df, columns, table, con):
     new = df.loc[:, columns]
     old = old.loc[:, columns]
 
-    df = pd.concat([new, old]).drop_duplicates(keep=False)
+    df = pd.concat([new, old, old]).drop_duplicates(keep=False)
     return df
 
 
@@ -175,11 +214,11 @@ def process_sigletons(singletons, out_dir, threads, con):
     query = check_existing(singletons, columns=["taxon"], table="taxa", con=con)
     insert_pd_sql(query=query, table="taxa", con=con)
 
-    # Insert data to table taxa
+    # Insert data to table genomes
     query = check_existing(
         singletons, columns=["taxon", "accession"], table="genomes", con=con
     )
-    genomes_derep = insert_pd_sql(query=query, table="genomes", con=con)
+    genomes = insert_pd_sql(query=query, table="genomes", con=con)
 
     # Insert data to table genomes_derep
     singletons.loc[:, "representative"] = int(1)
@@ -190,7 +229,7 @@ def process_sigletons(singletons, out_dir, threads, con):
         table="genomes_derep",
         con=con,
     )
-    genomes = insert_pd_sql(query=query, table="genomes_derep", con=con)
+    genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
 
     # Insert data to table results
     singletons.loc[:, "weight"] = None
@@ -264,12 +303,8 @@ def get_accession(assembly):
 
 
 def main():
-    global COPY
-    global DEBUG
-    args = get_arguments()
 
-    COPY = args.copy
-    DEBUG = args.debug
+    args = get_arguments()
 
     if COPY:
         out_dir = pathlib.Path(args.out_dir).absolute()
@@ -320,9 +355,12 @@ def main():
     classification_singletons = assm_data[
         assm_data["taxon"].isin(classification_singletons)
     ].reset_index(drop=True)
-    classifications_sorted = taxon_counts[taxon_counts["count"] > 1]["taxon"].tolist()
+
+    classifications_sorted_counts = taxon_counts[taxon_counts["count"] > 1].sort_values(
+        by=["count"], ascending=True
+    )
     classifications_sorted = assm_data[
-        assm_data["taxon"].isin(classifications_sorted)
+        assm_data["taxon"].isin(classifications_sorted_counts["taxon"])
     ].reset_index(drop=True)
     logging.info("Processing singletons")
     process_sigletons(
@@ -343,18 +381,21 @@ def main():
     #     max_jobs_array,
     #     con,
     # )
+    taxons = classifications_sorted_counts.loc[:, ["taxon"]]
 
-    classifications_sorted.groupby("taxon").apply(
-        dereplicate,
-        out_dir=args.out_dir,
-        threads=args.threads,
-        threshold=args.threshold,
-        chunks=args.chunks,
-        slurm_config=args.slurm_config,
-        tmp_dir=tmp_dir,
-        max_jobs_array=args.max_jobs_array,
-        con=con,
-    )
+    for taxa in taxons["taxon"]:
+        results = process_one_taxon(
+            taxon=taxa,
+            classification=classifications_sorted,
+            out_dir=args.out_dir,
+            threads=args.threads,
+            threshold=args.threshold,
+            chunks=args.chunks,
+            slurm_config=args.slurm_config,
+            tmp_dir=tmp_dir,
+            max_jobs_array=args.max_jobs_array,
+            con=con,
+        )
 
     # for taxon in classifications_sorted:
     #     process_one_taxon(
