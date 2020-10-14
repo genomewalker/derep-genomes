@@ -155,13 +155,9 @@ def binary_search_filter(g, low, high, weights):
                 return g, None
 
         if nx.is_connected(x):
-            x, w = binary_search_filter(
-                g, low=mid, high=high, weights=weights, debug=debug
-            )
+            x, w = binary_search_filter(g, low=mid, high=high, weights=weights)
         else:
-            x, w = binary_search_filter(
-                g, low=low, high=mid, weights=weights, debug=debug
-            )
+            x, w = binary_search_filter(g, low=low, high=mid, weights=weights)
 
         if nx.number_connected_components(x) == 1:
             return x, w
@@ -374,6 +370,7 @@ def dereplicate(
                 threshold
             )
         )
+
         reps, subgraphs = get_reps(graph=G_filt, partition=partition)
         derep_assemblies = []
         for i in range(len(reps)):
@@ -404,14 +401,17 @@ def dereplicate(
         ],
         columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
     )
-
     rep_keys = all_assemblies[all_assemblies["assembly"].isin(reps)][
         "accession"
     ].tolist()
-    all_assemblies = all_assemblies[all_assemblies["assembly"].isin(derep_assemblies)]
+    # all_assemblies = all_assemblies[
+    #     all_assemblies["assembly"].isin(derep_assemblies)
+    # ]
+    all_assemblies.loc[:, "derep"] = 0
+    all_assemblies.loc[all_assemblies["accession"].isin(rep_keys), "representative"] = 1
 
     all_assemblies.loc[:, "representative"] = 0
-    all_assemblies.loc[all_assemblies["accession"].isin(rep_keys), "representative"] = 1
+    all_assemblies.loc[all_assemblies["assembly"].isin(derep_assemblies), "derep"] = 1
 
     return all_assemblies, results
 
@@ -448,7 +448,12 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
     df = pd.DataFrame(results)
 
     if len(df.index) < 2:
-        if (source_len / len_diff) >= 0.1:
+        if len_diff > 0:
+            diff_ratio = source_len / len_diff
+        else:
+            diff_ratio = 0
+
+        if diff_ratio >= 0.1:
             assms = df["target"].tolist()
             assms.append(rep)
         else:
@@ -462,6 +467,7 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
         ]
         assms = df["target"].tolist()
         assms.append(rep)
+
     if df.empty:
         return [rep]
     else:

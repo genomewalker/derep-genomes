@@ -189,24 +189,21 @@ def check_if_done(con, taxon, acc2assm):
     jobs_done = retrieve_jobs_done(con, taxon)
     genomes_done = retrieve_taxa_analyzed(con, taxon)
 
-    if (jobs_done is not None) and (genomes_done is not None):
-        if not jobs_done.empty and not genomes_done.empty:
-            # check that there are no updates
-            jobs_done = jobs_done.merge(genomes_done).loc[:, ["accession", "file"]]
-            acc2assm.loc[:, "file"] = acc2assm["assembly"].apply(os.path.basename)
+    if not jobs_done.empty and not genomes_done.empty:
+        # check that there are no updates
+        jobs_done = jobs_done.merge(genomes_done).loc[:, ["accession", "file"]]
+        acc2assm.loc[:, "file"] = acc2assm["assembly"].apply(os.path.basename)
 
-            needs_update = check_if_updates(
-                jobs_done, acc2assm.loc[:, ["accession", "file"]]
-            )
-            if needs_update:
-                remove_entries(taxon, tables, con)
-                return False
-            # Check files are in the folder
-            # all_files_exist = not check_done_files_exists(files_done, out_dir)
-            # if all_files_exist:
-            #     return False
-        else:
+        needs_update = check_if_updates(
+            jobs_done, acc2assm.loc[:, ["accession", "file"]]
+        )
+        if needs_update:
+            remove_entries(taxon, tables, con)
             return False
+        # Check files are in the folder
+        # all_files_exist = not check_done_files_exists(files_done, out_dir)
+        # if all_files_exist:
+        #     return False
     else:
         return False
     return True
@@ -223,7 +220,7 @@ def retrieve_jobs_done(con, taxon):
     if not jobs.empty:
         return jobs
     else:
-        return None
+        return pd.DataFrame()
 
 
 def retrieve_taxa_analyzed(con, taxon):
@@ -234,7 +231,7 @@ def retrieve_taxa_analyzed(con, taxon):
         # accessions = [str(k[1]) for k in jobs]
         return taxons
     else:
-        return None
+        return pd.DataFrame()
 
 
 # def retrieve_taxa_analyzed(con, taxon):

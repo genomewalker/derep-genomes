@@ -79,9 +79,8 @@ def process_one_taxon(
     # check if already processed
     logging.info("Retrieving jobs done")
     is_done = check_if_done(con=con, taxon=taxon, acc2assm=acc_to_assemblies)
-
     if is_done:
-        logging.info("Taxon already processed")
+        logging.info("Taxon already processed\n")
         return
 
     if n_assemblies == 0:
@@ -102,8 +101,7 @@ def process_one_taxon(
             tmp_dir=tmp_dir,
             max_jobs_array=max_jobs_array,
         )
-
-        logging.info("Saving data in DB")
+        logging.debug("Saving data in DB")
 
         # Add taxa to taxa table
         derep_assemblies.loc[:, "taxon"] = taxon
@@ -131,7 +129,9 @@ def process_one_taxon(
 
         # Add derep genomes to derep genome table
         query = check_existing(
-            derep_assemblies.loc[:, ["accession", "representative"]],
+            df=derep_assemblies[derep_assemblies["derep"] == 1]
+            .loc[:, ["accession", "representative"]]
+            .copy(),
             columns=["accession", "representative"],
             table="genomes_derep",
             con=con,
@@ -162,11 +162,11 @@ def process_one_taxon(
             con.commit()
         except:
             pass
-        logging.info("Copying dereplicated assemblies to output directory")
         for assembly in derep_assemblies:
             if DEBUG:
                 print("{} -> {}".format(assembly, out_dir))
             if COPY:
+                logging.info("Copying dereplicated assemblies to output directory")
                 files = pd.DataFrame()
                 files.loc[:, "src"] = derep_assemblies.loc[:, "assembly"]
                 files.loc[:, "dst"] = out_dir
@@ -204,7 +204,7 @@ def insert_pd_sql(query, table, con):
     if query.empty:
         logging.info("All entries in table {} already present".format(table))
     else:
-        logging.info("Adding {} entries in table {}".format(query.shape[0], table))
+        logging.debug("Adding {} entries in table {}".format(query.shape[0], table))
         query.to_sql(name=table, con=con, if_exists="append", index=False)
 
 
@@ -341,8 +341,7 @@ def main():
     if args.selected_taxa:
         with args.selected_taxa as f:
             taxas = [line.rstrip() for line in f]
-        assm_data_done = assm_data[assm_data["taxon"].isin(taxas)]
-        assm_data = assm_data[~assm_data["taxon"].isin(taxas)]
+        assm_data = assm_data[assm_data["taxon"].isin(taxas)]
 
     logging.info("Finding singletons...")
     taxon_counts = assm_data.groupby("taxon", as_index=False)["taxon"].agg(
@@ -363,13 +362,15 @@ def main():
         assm_data["taxon"].isin(classifications_sorted_counts["taxon"])
     ].reset_index(drop=True)
     logging.info("Processing singletons")
-    process_sigletons(
-        singletons=classification_singletons,
-        out_dir=args.out_dir,
-        threads=args.threads,
-        con=con,
-    )
-
+    if not classification_singletons.empty:
+        process_sigletons(
+            singletons=classification_singletons,
+            out_dir=args.out_dir,
+            threads=args.threads,
+            con=con,
+        )
+    else:
+        logging.info("No singletons found\n")
     # derep_assemblies, results, reps = dereplicate(
     #     acc_to_assemblies,
     #     threads,
@@ -381,21 +382,21 @@ def main():
     #     max_jobs_array,
     #     con,
     # )
-    taxons = classifications_sorted_counts.loc[:, ["taxon"]]
-
-    for taxa in taxons["taxon"]:
-        results = process_one_taxon(
-            taxon=taxa,
-            classification=classifications_sorted,
-            out_dir=args.out_dir,
-            threads=args.threads,
-            threshold=args.threshold,
-            chunks=args.chunks,
-            slurm_config=args.slurm_config,
-            tmp_dir=tmp_dir,
-            max_jobs_array=args.max_jobs_array,
-            con=con,
-        )
+    if not classifications_sorted.empty:
+        taxons = classifications_sorted_counts.loc[:, ["taxon"]]
+        for taxa in taxons["taxon"]:
+            results = process_one_taxon(
+                taxon=taxa,
+                classification=classifications_sorted,
+                out_dir=args.out_dir,
+                threads=args.threads,
+                threshold=args.threshold,
+                chunks=args.chunks,
+                slurm_config=args.slurm_config,
+                tmp_dir=tmp_dir,
+                max_jobs_array=args.max_jobs_array,
+                con=con,
+            )
 
     # for taxon in classifications_sorted:
     #     process_one_taxon(
