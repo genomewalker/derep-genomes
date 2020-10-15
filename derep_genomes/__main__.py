@@ -448,7 +448,7 @@ def main():
             "chunks": args.chunks,
             "slurm_config": None,
             "tmp_dir": tmp_dir,
-            "max_jobs_array": args.max_jobs_array
+            "max_jobs_array": args.max_jobs_array,
         }
 
         if args.threads > 2:
@@ -484,11 +484,19 @@ def main():
 
     if not classification_large.empty:
         taxons = list(set(classification_large["taxon"]))
-        log.info(
-            "Dereplicating {:,} taxa with more assemblies using SLURM".format(
-                len(taxons), assm_min, assm_max
+        if args.slurm_info is not None:
+            log.info(
+                "Dereplicating {:,} taxa with more than 5 assemblies using SLURM".format(
+                    len(taxons)
+                )
             )
-        )
+        else:
+            log.info(
+                "Dereplicating {:,} taxa with more than 5 assemblies using {} threads".format(
+                    len(taxons), args.threads
+                )
+            )
+            log.warning("This can take a long time!!!")
         parms_large = {
             "classification": classification_large,
             "threads": args.threads,
@@ -496,7 +504,7 @@ def main():
             "chunks": args.chunks,
             "slurm_config": args.slurm_config.name,
             "tmp_dir": tmp_dir,
-            "max_jobs_array": args.max_jobs_array
+            "max_jobs_array": args.max_jobs_array,
         }
 
         if is_debug():
