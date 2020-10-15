@@ -30,6 +30,7 @@ from derep_genomes.general import (
     find_assemblies_for_accessions,
     suppress_stdout,
     get_assembly_filename,
+    applyParallel,
     COPY,
     DEBUG,
 )
@@ -49,6 +50,8 @@ from derep_genomes.dbops import (
     db_insert_genomes_derep,
     db_insert_results,
     check_if_done,
+    retrieve_all_taxa_analyzed,
+    retrieve_all_jobs_done,
 )
 from multiprocessing import Pool
 import tqdm
@@ -59,39 +62,32 @@ import pandas as pd
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 
 
-def process_one_taxon(
-    taxon,
-    classification,
-    out_dir,
-    threads,
-    threshold,
-    chunks,
-    slurm_config,
-    tmp_dir,
-    max_jobs_array,
-    con,
-):
-    logging.info("Dereplicating {}".format(taxon))
-    classification = classification[classification["taxon"] == taxon]
+def process_one_taxon(taxon, parms):
+    classification = parms["classification"]
+    threads = parms["threads"]
+    threshold = parms["threshold"]
+    chunks = parms["chunks"]
+    slurm_config = parms["slurm_config"]
+    tmp_dir = parms["tmp_dir"]
+    max_jobs_array = parms["max_jobs_array"]
+    silent = parms["silent"]
 
+    if not silent:
+        logging.info("Dereplicating {}".format(taxon))
+    classification = classification[classification["taxon"] == taxon]
     acc_to_assemblies = classification.loc[:, ["accession", "assembly"]]
     n_assemblies = classification.shape[0]
     # check if already processed
-    logging.info("Retrieving jobs done")
-    is_done = check_if_done(con=con, taxon=taxon, acc2assm=acc_to_assemblies)
-    if is_done:
-        logging.info("Taxon already processed\n")
-        return
 
     if n_assemblies == 0:
         return
     else:
-        logging.info(
-            "{:,} assemblies for this species, clustering to dereplicate.".format(
-                n_assemblies
+        if not silent:
+            logging.info(
+                "{:,} assemblies for this species, clustering to dereplicate.".format(
+                    n_assemblies
+                )
             )
-        )
-
         derep_assemblies, results = dereplicate(
             all_assemblies=acc_to_assemblies,
             threads=threads,
@@ -100,85 +96,90 @@ def process_one_taxon(
             slurm_config=slurm_config,
             tmp_dir=tmp_dir,
             max_jobs_array=max_jobs_array,
+            silent=silent,
         )
-        logging.debug("Saving data in DB")
+
+        if not silent:
+            logging.debug("Saving data to DB")
 
         # Add taxa to taxa table
         derep_assemblies.loc[:, "taxon"] = taxon
         derep_assemblies.loc[:, "file"] = derep_assemblies["assembly"].apply(
             os.path.basename
         )
-
         results.loc[:, "taxon"] = taxon
+        return derep_assemblies, results
 
-        query = check_existing(
-            df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
-            columns=["taxon"],
-            table="taxa",
-            con=con,
-        )
-        insert_pd_sql(query=query, table="taxa", con=con)
-        # Add genomes to genome table
-        query = check_existing(
-            df=derep_assemblies.loc[:, ["taxon", "accession"]],
-            columns=["taxon", "accession"],
-            table="genomes",
-            con=con,
-        )
-        genomes = insert_pd_sql(query=query, table="genomes", con=con)
 
-        # Add derep genomes to derep genome table
-        query = check_existing(
-            df=derep_assemblies[derep_assemblies["derep"] == 1]
-            .loc[:, ["accession", "representative"]]
-            .copy(),
-            columns=["accession", "representative"],
-            table="genomes_derep",
-            con=con,
-        )
-        genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
+def insert_to_db(derep_assemblies, results, con, threads, out_dir):
+    query = check_existing(
+        df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
+        columns=["taxon"],
+        table="taxa",
+        con=con,
+    )
+    insert_pd_sql(query=query, table="taxa", con=con)
+    # Add genomes to genome table
+    query = check_existing(
+        df=derep_assemblies.loc[:, ["taxon", "accession"]],
+        columns=["taxon", "accession"],
+        table="genomes",
+        con=con,
+    )
+    genomes = insert_pd_sql(query=query, table="genomes", con=con)
 
-        # Add results to results table
-        query = check_existing(
-            results.loc[
-                :, ["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"]
-            ],
-            columns=["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"],
-            table="results",
-            con=con,
-        )
-        results_db = insert_pd_sql(query=query, table="results", con=con)
+    # Add derep genomes to derep genome table
+    query = check_existing(
+        df=derep_assemblies[derep_assemblies["derep"] == 1]
+        .loc[:, ["accession", "representative"]]
+        .copy(),
+        columns=["accession", "representative"],
+        table="genomes_derep",
+        con=con,
+    )
+    genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
 
-        # Add jobs done to table
-        query = check_existing(
-            derep_assemblies.loc[:, ["taxon", "accession", "file"]],
-            columns=["taxon", "accession", "file"],
-            table="jobs_done",
-            con=con,
-        )
-        jobs_done_db = insert_pd_sql(query=query, table="jobs_done", con=con)
+    # Add results to results table
+    query = check_existing(
+        results.loc[
+            :, ["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"]
+        ],
+        columns=["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"],
+        table="results",
+        con=con,
+    )
+    results_db = insert_pd_sql(query=query, table="results", con=con)
 
-        try:
-            con.commit()
-        except:
-            pass
-        for assembly in derep_assemblies:
+    # Add jobs done to table
+    query = check_existing(
+        derep_assemblies.loc[:, ["taxon", "accession", "file"]],
+        columns=["taxon", "accession", "file"],
+        table="jobs_done",
+        con=con,
+    )
+    jobs_done_db = insert_pd_sql(query=query, table="jobs_done", con=con)
+
+    try:
+        con.commit()
+    except:
+        pass
+    for assembly in derep_assemblies:
+        if DEBUG:
+            print("{} -> {}".format(assembly, out_dir))
+        if COPY:
+            logging.info("Copying dereplicated assemblies to output directory")
+            files = pd.DataFrame()
+            files.loc[:, "src"] = derep_assemblies.loc[:, "assembly"]
+            files.loc[:, "dst"] = out_dir
+            files = list(files.itertuples(index=False, name=None))
             if DEBUG:
-                print("{} -> {}".format(assembly, out_dir))
-            if COPY:
-                logging.info("Copying dereplicated assemblies to output directory")
-                files = pd.DataFrame()
-                files.loc[:, "src"] = derep_assemblies.loc[:, "assembly"]
-                files.loc[:, "dst"] = out_dir
-                files = list(files.itertuples(index=False, name=None))
-                if DEBUG:
-                    files = list(map(copy_files, files))
-                else:
-                    p = Pool(threads)
-                    files = list(
-                        tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
-                    )
-        logging.info("Dereplication complete. Job saved in DB")
+                files = list(map(copy_files, files))
+            else:
+                p = Pool(threads)
+                files = list(
+                    tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
+                )
+    logging.info("Dereplication complete. Jobs saved to DB\n")
 
 
 def copy_files(src_dst):
@@ -204,7 +205,8 @@ def insert_pd_sql(query, table, con):
     if query.empty:
         logging.info("All entries in table {} already present".format(table))
     else:
-        logging.debug("Adding {} entries in table {}".format(query.shape[0], table))
+        if DEBUG:
+            logging.debug("Adding {} entries in table {}".format(query.shape[0], table))
         query.to_sql(name=table, con=con, if_exists="append", index=False)
 
 
@@ -302,6 +304,29 @@ def get_accession(assembly):
     return res
 
 
+def check_done(data, con):
+    data.loc[:, "file"] = data["assembly"].apply(os.path.basename)
+    df = check_existing(
+        data, columns=["taxon", "accession", "file"], table="jobs_done", con=con
+    )
+    return df
+
+
+def check_done_apply(df, parms):
+    db = parms["db"]
+    con = sqlite3.connect(db, isolation_level="EXCLUSIVE")
+    taxon = list(set(df["taxon"]))[0]
+    acc_to_assemblies = df.loc[:, ["accession", "assembly"]]
+    is_done = check_if_done(con=con, taxon=taxon, acc2assm=acc_to_assemblies)
+
+    con.close()
+    return is_done
+
+
+def mute():
+    sys.stdout = open(os.devnull, "w")
+
+
 def main():
 
     args = get_arguments()
@@ -334,33 +359,81 @@ def main():
         ],
         columns=["taxon", "accession", "accession_nover"],
     )
-
+    logging.info("Found {:,} assemblies".format(classifications_df.shape[0]))
     all_assemblies_df = list(map(get_accession, all_assemblies))
     assm_data = classifications_df.merge(pd.DataFrame(all_assemblies_df))
+    assm_data.loc[:, "file"] = assm_data["assembly"].apply(os.path.basename)
 
     if args.selected_taxa:
         with args.selected_taxa as f:
             taxas = [line.rstrip() for line in f]
         assm_data = assm_data[assm_data["taxon"].isin(taxas)]
 
+    taxa_in_db = retrieve_all_taxa_analyzed(con)
+    jobs_done = retrieve_all_jobs_done(con)
+    ntaxa = len(list(set(assm_data["taxon"])))
+
+    logging.info("Found {:,}/{:,} taxa in the DB".format(taxa_in_db.shape[0], ntaxa))
+
+    logging.info("Checking assemblies already processed")
+
+    if not jobs_done.empty and not taxa_in_db.empty:
+        # check that there are no updates
+        jobs_done = jobs_done.merge(taxa_in_db).loc[:, ["accession", "file"]]
+        to_do = pd.concat(
+            [assm_data.loc[:, ["accession", "file"]], jobs_done, jobs_done]
+        ).drop_duplicates(keep=False)
+        to_do = assm_data[assm_data["accession"].isin(to_do["accession"])]
+        to_rm = pd.concat(
+            [to_do.loc[:, ["taxon"]], taxa_in_db, taxa_in_db]
+        ).drop_duplicates(keep=False)
+        # TODO: create funtion that removes entries that need to be updated
+    else:
+        logging.info("No jobs found in the database")
+        to_do = assm_data
+
+    logging.info(
+        "{:,}/{:,} assemblies already processed".format(
+            to_do.shape[0], assm_data.shape[0]
+        )
+    )
+
     logging.info("Finding singletons...")
-    taxon_counts = assm_data.groupby("taxon", as_index=False)["taxon"].agg(
+    taxon_counts = to_do.groupby("taxon", as_index=False)["taxon"].agg(
         {"count": "count"}
     )
 
     classification_singletons = taxon_counts[taxon_counts["count"] < 2][
         "taxon"
     ].tolist()
-    classification_singletons = assm_data[
-        assm_data["taxon"].isin(classification_singletons)
+    classification_singletons = to_do[
+        to_do["taxon"].isin(classification_singletons)
     ].reset_index(drop=True)
 
     classifications_sorted_counts = taxon_counts[taxon_counts["count"] > 1].sort_values(
         by=["count"], ascending=True
     )
-    classifications_sorted = assm_data[
-        assm_data["taxon"].isin(classifications_sorted_counts["taxon"])
+
+    assm_min = 2
+    assm_max = 4
+    classifications_small = to_do[
+        to_do["taxon"].isin(
+            classifications_sorted_counts[
+                classifications_sorted_counts["count"].isin(
+                    list(range(assm_min, assm_max + 1))
+                )
+            ]["taxon"]
+        )
     ].reset_index(drop=True)
+
+    classifications_large = to_do[
+        to_do["taxon"].isin(
+            classifications_sorted_counts[classifications_sorted_counts["count"] > 5][
+                "taxon"
+            ]
+        )
+    ].reset_index(drop=True)
+
     logging.info("Processing singletons")
     if not classification_singletons.empty:
         process_sigletons(
@@ -382,22 +455,58 @@ def main():
     #     max_jobs_array,
     #     con,
     # )
-    if not classifications_sorted.empty:
-        taxons = classifications_sorted_counts.loc[:, ["taxon"]]
-        for taxa in taxons["taxon"]:
-            results = process_one_taxon(
-                taxon=taxa,
-                classification=classifications_sorted,
-                out_dir=args.out_dir,
-                threads=args.threads,
-                threshold=args.threshold,
-                chunks=args.chunks,
-                slurm_config=args.slurm_config,
-                tmp_dir=tmp_dir,
-                max_jobs_array=args.max_jobs_array,
-                con=con,
+
+    if DEBUG:
+        silent = False
+    else:
+        silent = True
+
+    parms = {
+        "classification": classifications_small,
+        "threads": 2,
+        "threshold": args.threshold,
+        "chunks": args.chunks,
+        "slurm_config": None,
+        "tmp_dir": tmp_dir,
+        "max_jobs_array": args.max_jobs_array,
+        "silent": silent,
+    }
+
+    if args.threads > 2:
+        nworkers = round(args.threads / 2)
+    else:
+        nworkers = 1
+    logging.info(
+        "Dereplicating taxa with {} to {} assemblies using {} workers".format(
+            assm_min, assm_max, nworkers
+        )
+    )
+    if not classifications_small.empty:
+        taxons = list(classifications_small["taxon"])
+        if DEBUG:
+            files = list(map(copy_files, files))
+        else:
+            p = Pool(nworkers)
+            logging.basicConfig(
+                format="%(asctime)s - %(message)s", level=logging.CRITICAL
+            )
+            dfs = list(
+                tqdm.tqdm(
+                    p.imap_unordered(partial(process_one_taxon, parms=parms), taxons),
+                    total=len(taxons),
+                )
             )
 
+        derep_assemblies = pd.concat([x[0] for x in dfs])
+        results = pd.concat([x[1] for x in dfs])
+        insert_to_db(
+            derep_assemblies=derep_assemblies,
+            results=results,
+            con=con,
+            threads=args.threads,
+            out_dir=args.out_dir,
+        )
+    exit(0)
     # for taxon in classifications_sorted:
     #     process_one_taxon(
     #         classification=taxon,

@@ -223,9 +223,30 @@ def retrieve_jobs_done(con, taxon):
         return pd.DataFrame()
 
 
+def retrieve_all_jobs_done(con):
+    query = "SELECT * from jobs_done"
+    jobs = pd.read_sql(query, con)
+
+    if not jobs.empty:
+        return jobs
+    else:
+        return pd.DataFrame()
+
+
 def retrieve_taxa_analyzed(con, taxon):
     query = "SELECT * from genomes where taxon =?"
     taxons = pd.read_sql(query, con, params=(taxon,))
+
+    if not taxons.empty:
+        # accessions = [str(k[1]) for k in jobs]
+        return taxons
+    else:
+        return pd.DataFrame()
+
+
+def retrieve_all_taxa_analyzed(con):
+    query = "SELECT * from taxa"
+    taxons = pd.read_sql(query, con)
 
     if not taxons.empty:
         # accessions = [str(k[1]) for k in jobs]

@@ -8,8 +8,12 @@ import pathlib
 import collections
 import textwrap
 import logging
-from contextlib import contextmanager
-
+import pandas as pd
+from multiprocessing import Pool
+from functools import partial
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from os import devnull
+import tqdm
 from derep_genomes import __version__
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
@@ -274,10 +278,17 @@ def get_contig_lengths(filename):
 
 @contextmanager
 def suppress_stdout():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
+    """A context manager that redirects stdout and stderr to devnull"""
+    with open(devnull, "w") as fnull:
+        with redirect_stderr(fnull) as err, redirect_stdout(fnull) as out:
+            yield (err, out)
+
+
+def applyParallel(dfGrouped, func, threads, parms):
+    p = Pool(threads)
+    func = partial(func, parms=parms)
+    ret_list = tqdm.tqdm(
+        p.map(func, [group for name, group in dfGrouped]),
+        total=len([group for name, group in dfGrouped]),
+    )
+    return pd.concat(ret_list)
