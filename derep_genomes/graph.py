@@ -226,10 +226,10 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
         for cmd in cmds:
             outfile.write("%s\n" % cmd)
 
-    slurm = Slurm(**yaml.load(slurm_config, Loader=yaml.FullLoader))
+    slurm = Slurm(**yaml.load(open(slurm_config), Loader=yaml.FullLoader))
 
     if len(cmds) > max_jobs_array:
-        log.info(
+        log.debug(
             "The number of jobs ({}) is larger than the allowed array size ({}). Splitting jobs..".format(
                 len(cmds), max_jobs_array
             )
@@ -237,7 +237,7 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
 
     job_ranges = split_fixed_size(range(1, len(cmds) + 1), max_jobs_array)
     job_ids = []
-    log.info(
+    log.debug(
         "Mapping {} jobs to SLURM in {} batch(es)".format(len(cmds), len(job_ranges))
     )
     for r in job_ranges:
@@ -258,11 +258,7 @@ def reduce_slurm_jobs(ofiles, threads):
         dfs = list(map(process_fastANI_results, ofiles))
     else:
         p = Pool(threads)
-        dfs = list(
-            tqdm.tqdm(
-                p.imap_unordered(process_fastANI_results, ofiles), total=len(ofiles)
-            )
-        )
+        dfs = list(p.imap_unordered(process_fastANI_results, ofiles))
     dfs = pd.concat(dfs)
     return dfs
 
@@ -280,7 +276,6 @@ def dereplicate(
     slurm_config,
     tmp_dir,
     max_jobs_array,
-    silent=False,
 ):
     """
     This function dereplicates genomes by Taxon by:
@@ -293,36 +288,33 @@ def dereplicate(
     n_assemblies = all_assemblies.shape[0]
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
 
-        if n_assemblies <= 6 or slurm_config is None:
+        if n_assemblies < 6 or slurm_config is None:
             if (n_assemblies * n_assemblies) < threads:
                 threads = n_assemblies * n_assemblies
-            if not silent:
-                log.info(
-                    "Found {} assemblies, using default fastANI with {} threads".format(
-                        n_assemblies, threads
-                    )
+            log.debug(
+                "Found {} assemblies, using default fastANI with {} threads".format(
+                    n_assemblies, threads
                 )
+            )
             ani_results = pairwise_fastANI(
                 assemblies=all_assemblies["assembly"].tolist(),
                 threads=threads,
                 temp_dir=temp_dir,
             )
-            if not silent:
-                log.info("Processing ANI results")
+            log.debug("Processing ANI results")
             pairwise_distances = process_fastANI_results(ani_results)
         else:
             n = chunks
-            chunks = split_fixed_size(all_assemblies["assemblies"].tolist(), n)
+            chunks = split_fixed_size(all_assemblies["assembly"].tolist(), n)
             # chunks = [
             #     all_assemblies[i * n : (i + 1) * n]
             #     for i in range((len(all_assemblies) + n - 1) // n)
             # ]
-            if not silent:
-                log.info(
-                    "Found {} assemblies, creating {} chunks with {} genomes".format(
-                        len(all_assemblies), len(chunks), n
-                    )
+            log.debug(
+                "Found {} assemblies, creating {} chunks with {} genomes".format(
+                    len(all_assemblies), len(chunks), n
                 )
+            )
             # save chunks to disk
             files, wdir = save_chunks_to_disk(chunks, temp_dir)
             # Create fastANI commands
@@ -331,12 +323,10 @@ def dereplicate(
             slurm_jobs = map_slurm_jobs(
                 cmds, ofiles, slurm_config, odir, max_jobs_array
             )
-            if not silent:
-                log.info("Reducing SLURM jobs and processing ANI results")
+            log.debug("Reducing SLURM jobs and processing ANI results")
             pairwise_distances = reduce_slurm_jobs(ofiles, threads)
         # Convert pw dist to graph
-        if not silent:
-            log.info("Generating ANI graph")
+        log.debug("Generating ANI graph")
         M = nx.from_pandas_edgelist(
             pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
         )
@@ -356,32 +346,29 @@ def dereplicate(
             weights.append(d["weight"])
 
         weights = sorted(set(weights))
-        if not silent:
-            log.info("Filtering ANI graph")
+        log.debug("Filtering ANI graph")
         G_filt, w_filt = binary_search_filter(
             g=G, low=0, high=len(weights) - 1, weights=weights
         )
 
-        if not silent:
-            log.info(
-                "Finding genome representatives using Louvain + eigenvector centrality"
-            )
+        log.debug(
+            "Finding genome representatives using Louvain + eigenvector centrality"
+        )
 
         partition = community_louvain.best_partition(G_filt, resolution=1.0)
-        if not silent:
-            log.info(
-                "Graph properties: w_filt={} components={} edges={} communities={}".format(
-                    w_filt,
-                    nx.number_connected_components(G_filt),
-                    G_filt.number_of_edges(),
-                    len(set([partition[k] for k in partition])),
-                )
+        log.debug(
+            "Graph properties: w_filt={} components={} edges={} communities={}".format(
+                w_filt,
+                nx.number_connected_components(G_filt),
+                G_filt.number_of_edges(),
+                len(set([partition[k] for k in partition])),
             )
-            log.info(
-                "Refining genome selection (length difference and fraction aligned, z-score={})".format(
-                    threshold
-                )
+        )
+        log.debug(
+            "Refining genome selection (length difference and fraction aligned, z-score={})".format(
+                threshold
             )
+        )
 
         reps, subgraphs = get_reps(graph=G_filt, partition=partition)
         derep_assemblies = []
@@ -398,10 +385,9 @@ def dereplicate(
             else:
                 derep_assemblies = candidates
     derep_assemblies = list(set(derep_assemblies))
-    if not silent:
-        log.info(
-            "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
-        )
+    log.debug(
+        "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
+    )
     results = pd.DataFrame(
         [
             (

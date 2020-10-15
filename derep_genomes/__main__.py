@@ -70,7 +70,6 @@ def process_one_taxon(taxon, parms):
     slurm_config = parms["slurm_config"]
     tmp_dir = parms["tmp_dir"]
     max_jobs_array = parms["max_jobs_array"]
-    silent = parms["silent"]
 
     log.debug("Dereplicating {}".format(taxon))
     classification = classification[classification["taxon"] == taxon]
@@ -81,12 +80,11 @@ def process_one_taxon(taxon, parms):
     if n_assemblies == 0:
         return
     else:
-        if not silent:
-            log.debug(
-                "{:,} assemblies for this species, clustering to dereplicate.".format(
-                    n_assemblies
-                )
+        log.debug(
+            "{:,} assemblies for this species, clustering to dereplicate.".format(
+                n_assemblies
             )
+        )
         derep_assemblies, results = dereplicate(
             all_assemblies=acc_to_assemblies,
             threads=threads,
@@ -95,10 +93,7 @@ def process_one_taxon(taxon, parms):
             slurm_config=slurm_config,
             tmp_dir=tmp_dir,
             max_jobs_array=max_jobs_array,
-            silent=silent,
         )
-        if not silent:
-            log.debug("Saving data to DB")
 
         # Add taxa to taxa table
         derep_assemblies.loc[:, "taxon"] = taxon
@@ -117,6 +112,7 @@ def insert_to_db(derep_assemblies, results, con, threads, out_dir):
         con=con,
     )
     insert_pd_sql(query=query, table="taxa", con=con)
+
     # Add genomes to genome table
     query = check_existing(
         df=derep_assemblies.loc[:, ["taxon", "accession"]],
@@ -391,15 +387,14 @@ def main():
             [to_do.loc[:, ["taxon"]], taxa_in_db, taxa_in_db]
         ).drop_duplicates(keep=False)
         # TODO: create funtion that removes entries that need to be updated
+        log.info(
+            "{:,}/{:,} assemblies already processed".format(
+                to_do.shape[0], assm_data.shape[0]
+            )
+        )
     else:
         log.info("No jobs found in the database")
         to_do = assm_data
-
-    log.info(
-        "{:,}/{:,} assemblies already processed".format(
-            to_do.shape[0], assm_data.shape[0]
-        )
-    )
 
     log.info("Finding singletons...")
     taxon_counts = to_do.groupby("taxon", as_index=False)["taxon"].agg(
@@ -413,31 +408,26 @@ def main():
         to_do["taxon"].isin(classification_singletons)
     ].reset_index(drop=True)
 
-    classifications_sorted_counts = taxon_counts[taxon_counts["count"] > 1].sort_values(
-        by=["count"], ascending=True
-    )
+    # classifications_sorted_counts = taxon_counts[taxon_counts["count"] > 1].sort_values(
+    #     by=["count"], ascending=True
+    # )
 
     assm_min = 2
-    assm_max = 4
-    classifications_small = to_do[
-        to_do["taxon"].isin(
-            classifications_sorted_counts[
-                classifications_sorted_counts["count"].isin(
-                    list(range(assm_min, assm_max + 1))
-                )
-            ]["taxon"]
-        )
-    ].reset_index(drop=True)
+    assm_max = 5
 
-    classifications_large = to_do[
-        to_do["taxon"].isin(
-            classifications_sorted_counts[classifications_sorted_counts["count"] > 5][
-                "taxon"
-            ]
-        )
-    ].reset_index(drop=True)
+    classification_small = taxon_counts[
+        taxon_counts["count"].isin(range(assm_min, assm_max + 1))
+    ]["taxon"].tolist()
+    classification_small = to_do[to_do["taxon"].isin(classification_small)].reset_index(
+        drop=True
+    )
 
-    log.info("Processing singletons")
+    classification_large = taxon_counts[taxon_counts["count"] > 5]["taxon"].tolist()
+    classification_large = to_do[to_do["taxon"].isin(classification_large)].reset_index(
+        drop=True
+    )
+
+    log.info("Processing {:,} singletons".format(classification_singletons.shape[0]))
     if not classification_singletons.empty:
         process_sigletons(
             singletons=classification_singletons,
@@ -447,34 +437,18 @@ def main():
         )
     else:
         log.info("No singletons found\n")
-    # derep_assemblies, results, reps = dereplicate(
-    #     acc_to_assemblies,
-    #     threads,
-    #     threshold,
-    #     chunks,
-    #     slurm_config,
-    #     tmp_dir,
-    #     debug,
-    #     max_jobs_array,
-    #     con,
-    # )
 
-    if not classifications_small.empty:
-        taxons = list(classifications_small["taxon"])
-        if is_debug():
-            silent = False
-        else:
-            silent = True
+    if not classification_small.empty:
+        taxons = list(set(classification_small["taxon"]))
 
         parms = {
-            "classification": classifications_small,
+            "classification": classification_small,
             "threads": 2,
             "threshold": args.threshold,
             "chunks": args.chunks,
             "slurm_config": None,
             "tmp_dir": tmp_dir,
-            "max_jobs_array": args.max_jobs_array,
-            "silent": silent,
+            "max_jobs_array": args.max_jobs_array
         }
 
         if args.threads > 2:
@@ -507,21 +481,45 @@ def main():
             threads=args.threads,
             out_dir=args.out_dir,
         )
-    exit(0)
-    # for taxon in classifications_sorted:
-    #     process_one_taxon(
-    #         classification=taxon,
-    #         accessions=classifications[taxon],
-    #         out_dir=out_dir,
-    #         threads=args.threads,
-    #         threshold=args.threshold,
-    #         chunks=args.chunks,
-    #         slurm_config=args.slurm_config,
-    #         tmp_dir=tmp_dir,
-    #         debug=args.debug,
-    #         max_jobs_array=args.max_jobs_array,
-    #         con=con,
-    #     )
+
+    if not classification_large.empty:
+        taxons = list(set(classification_large["taxon"]))
+        log.info(
+            "Dereplicating {:,} taxa with more assemblies using SLURM".format(
+                len(taxons), assm_min, assm_max
+            )
+        )
+        parms_large = {
+            "classification": classification_large,
+            "threads": args.threads,
+            "threshold": args.threshold,
+            "chunks": args.chunks,
+            "slurm_config": args.slurm_config.name,
+            "tmp_dir": tmp_dir,
+            "max_jobs_array": args.max_jobs_array
+        }
+
+        if is_debug():
+            dfs = list(
+                map(partial(process_one_taxon, parms=parms_large), taxons),
+            )
+        else:
+            dfs = list(
+                tqdm.tqdm(
+                    map(partial(process_one_taxon, parms=parms_large), taxons),
+                    total=len(taxons),
+                )
+            )
+        derep_assemblies = pd.concat([x[0] for x in dfs])
+        results = pd.concat([x[1] for x in dfs])
+        insert_to_db(
+            derep_assemblies=derep_assemblies,
+            results=results,
+            con=con,
+            threads=args.threads,
+            out_dir=args.out_dir,
+        )
+
     con.close()
 
 
