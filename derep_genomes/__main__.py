@@ -31,8 +31,7 @@ from derep_genomes.general import (
     suppress_stdout,
     get_assembly_filename,
     applyParallel,
-    COPY,
-    DEBUG,
+    is_debug,
 )
 from derep_genomes.graph import dereplicate
 import logging
@@ -58,8 +57,9 @@ import tqdm
 from functools import partial
 import pandas as pd
 
+COPY = False
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+log = logging.getLogger("my_logger")
 
 
 def process_one_taxon(taxon, parms):
@@ -72,8 +72,7 @@ def process_one_taxon(taxon, parms):
     max_jobs_array = parms["max_jobs_array"]
     silent = parms["silent"]
 
-    if not silent:
-        logging.info("Dereplicating {}".format(taxon))
+    log.debug("Dereplicating {}".format(taxon))
     classification = classification[classification["taxon"] == taxon]
     acc_to_assemblies = classification.loc[:, ["accession", "assembly"]]
     n_assemblies = classification.shape[0]
@@ -83,7 +82,7 @@ def process_one_taxon(taxon, parms):
         return
     else:
         if not silent:
-            logging.info(
+            log.debug(
                 "{:,} assemblies for this species, clustering to dereplicate.".format(
                     n_assemblies
                 )
@@ -98,9 +97,8 @@ def process_one_taxon(taxon, parms):
             max_jobs_array=max_jobs_array,
             silent=silent,
         )
-
         if not silent:
-            logging.debug("Saving data to DB")
+            log.debug("Saving data to DB")
 
         # Add taxa to taxa table
         derep_assemblies.loc[:, "taxon"] = taxon
@@ -164,22 +162,21 @@ def insert_to_db(derep_assemblies, results, con, threads, out_dir):
     except:
         pass
     for assembly in derep_assemblies:
-        if DEBUG:
-            print("{} -> {}".format(assembly, out_dir))
+        log.debug("{} -> {}".format(assembly, out_dir))
         if COPY:
-            logging.info("Copying dereplicated assemblies to output directory")
+            log.info("Copying dereplicated assemblies to output directory")
             files = pd.DataFrame()
             files.loc[:, "src"] = derep_assemblies.loc[:, "assembly"]
             files.loc[:, "dst"] = out_dir
             files = list(files.itertuples(index=False, name=None))
-            if DEBUG:
+            if is_debug():
                 files = list(map(copy_files, files))
             else:
                 p = Pool(threads)
                 files = list(
                     tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
                 )
-    logging.info("Dereplication complete. Jobs saved to DB\n")
+    log.info("Dereplication complete. Jobs saved to DB\n")
 
 
 def copy_files(src_dst):
@@ -203,10 +200,9 @@ def check_existing(df, columns, table, con):
 
 def insert_pd_sql(query, table, con):
     if query.empty:
-        logging.info("All entries in table {} already present".format(table))
+        log.debug("All entries in table {} already present".format(table))
     else:
-        if DEBUG:
-            logging.debug("Adding {} entries in table {}".format(query.shape[0], table))
+        log.debug("Adding {} entries in table {}".format(query.shape[0], table))
         query.to_sql(name=table, con=con, if_exists="append", index=False)
 
 
@@ -261,7 +257,7 @@ def process_sigletons(singletons, out_dir, threads, con):
         pass
 
     if COPY:
-        logging.info(
+        log.info(
             "Copying {} files with singletons to {}".format(
                 singletons.shape[0], out_dir
             )
@@ -271,7 +267,7 @@ def process_sigletons(singletons, out_dir, threads, con):
         files.loc[:, "dst"] = out_dir
         files = list(files.itertuples(index=False, name=None))
 
-        if DEBUG:
+        if is_debug():
             files = list(map(copy_files, files))
         else:
             p = Pool(threads)
@@ -280,11 +276,10 @@ def process_sigletons(singletons, out_dir, threads, con):
             )
 
 
-def find_assemblies(x, classifications, all_assm, debug):
+def find_assemblies(x, classifications, all_assm):
     accessions = sorted(classifications[x])
-    if debug:
-        print(x)
-        print(accessions[0])
+    log.debug(x)
+    log.debug(accessions[0])
     res = find_assemblies_for_accessions(accessions=accessions, all_assemblies=all_assm)
     return res
 
@@ -328,8 +323,16 @@ def mute():
 
 
 def main():
+    logging.basicConfig(
+        level=logging.DEBUG, format="%(levelname)s ::: %(asctime)s ::: %(message)s"
+    )
 
     args = get_arguments()
+    logging.getLogger("my_logger").setLevel(
+        logging.DEBUG if args.debug else logging.INFO
+    )
+
+    COPY = args.copy
 
     if COPY:
         out_dir = pathlib.Path(args.out_dir).absolute()
@@ -341,16 +344,16 @@ def main():
     db_empty = check_if_db_empty(con)
 
     if db_empty:
-        logging.info("Creating db tables")
+        log.info("Creating db tables")
         create_db_tables(con)
     else:
-        logging.info("Checking correct tables exist")
+        log.info("Checking correct tables exist")
         check_db_tables(con)
 
     all_assemblies = find_all_assemblies(args.in_dir)
     classifications = load_classifications(args.tax_file)
 
-    logging.info("Filtering taxa with assemblies")
+    log.info("Filtering taxa with assemblies")
     classifications_df = pd.DataFrame(
         [
             (key, var, shorten_accession(var))
@@ -359,7 +362,7 @@ def main():
         ],
         columns=["taxon", "accession", "accession_nover"],
     )
-    logging.info("Found {:,} assemblies".format(classifications_df.shape[0]))
+    log.info("Found {:,} assemblies".format(classifications_df.shape[0]))
     all_assemblies_df = list(map(get_accession, all_assemblies))
     assm_data = classifications_df.merge(pd.DataFrame(all_assemblies_df))
     assm_data.loc[:, "file"] = assm_data["assembly"].apply(os.path.basename)
@@ -373,9 +376,9 @@ def main():
     jobs_done = retrieve_all_jobs_done(con)
     ntaxa = len(list(set(assm_data["taxon"])))
 
-    logging.info("Found {:,}/{:,} taxa in the DB".format(taxa_in_db.shape[0], ntaxa))
+    log.info("Found {:,}/{:,} taxa in the DB".format(taxa_in_db.shape[0], ntaxa))
 
-    logging.info("Checking assemblies already processed")
+    log.info("Checking assemblies already processed")
 
     if not jobs_done.empty and not taxa_in_db.empty:
         # check that there are no updates
@@ -389,16 +392,16 @@ def main():
         ).drop_duplicates(keep=False)
         # TODO: create funtion that removes entries that need to be updated
     else:
-        logging.info("No jobs found in the database")
+        log.info("No jobs found in the database")
         to_do = assm_data
 
-    logging.info(
+    log.info(
         "{:,}/{:,} assemblies already processed".format(
             to_do.shape[0], assm_data.shape[0]
         )
     )
 
-    logging.info("Finding singletons...")
+    log.info("Finding singletons...")
     taxon_counts = to_do.groupby("taxon", as_index=False)["taxon"].agg(
         {"count": "count"}
     )
@@ -434,7 +437,7 @@ def main():
         )
     ].reset_index(drop=True)
 
-    logging.info("Processing singletons")
+    log.info("Processing singletons")
     if not classification_singletons.empty:
         process_sigletons(
             singletons=classification_singletons,
@@ -443,7 +446,7 @@ def main():
             con=con,
         )
     else:
-        logging.info("No singletons found\n")
+        log.info("No singletons found\n")
     # derep_assemblies, results, reps = dereplicate(
     #     acc_to_assemblies,
     #     threads,
@@ -456,40 +459,38 @@ def main():
     #     con,
     # )
 
-    if DEBUG:
-        silent = False
-    else:
-        silent = True
-
-    parms = {
-        "classification": classifications_small,
-        "threads": 2,
-        "threshold": args.threshold,
-        "chunks": args.chunks,
-        "slurm_config": None,
-        "tmp_dir": tmp_dir,
-        "max_jobs_array": args.max_jobs_array,
-        "silent": silent,
-    }
-
-    if args.threads > 2:
-        nworkers = round(args.threads / 2)
-    else:
-        nworkers = 1
-    logging.info(
-        "Dereplicating taxa with {} to {} assemblies using {} workers".format(
-            assm_min, assm_max, nworkers
-        )
-    )
     if not classifications_small.empty:
         taxons = list(classifications_small["taxon"])
-        if DEBUG:
-            files = list(map(copy_files, files))
+        if is_debug():
+            silent = False
+        else:
+            silent = True
+
+        parms = {
+            "classification": classifications_small,
+            "threads": 2,
+            "threshold": args.threshold,
+            "chunks": args.chunks,
+            "slurm_config": None,
+            "tmp_dir": tmp_dir,
+            "max_jobs_array": args.max_jobs_array,
+            "silent": silent,
+        }
+
+        if args.threads > 2:
+            nworkers = round(args.threads / 2)
+        else:
+            nworkers = 1
+        log.info(
+            "Dereplicating {:,} taxa with {} to {} assemblies using {} workers".format(
+                len(taxons), assm_min, assm_max, nworkers
+            )
+        )
+
+        if is_debug():
+            files = list(map(partial(process_one_taxon, parms=parms), taxons))
         else:
             p = Pool(nworkers)
-            logging.basicConfig(
-                format="%(asctime)s - %(message)s", level=logging.CRITICAL
-            )
             dfs = list(
                 tqdm.tqdm(
                     p.imap_unordered(partial(process_one_taxon, parms=parms), taxons),

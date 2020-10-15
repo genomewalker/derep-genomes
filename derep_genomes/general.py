@@ -16,9 +16,15 @@ from os import devnull
 import tqdm
 from derep_genomes import __version__
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
 COPY = False
-DEBUG = False
+
+log = logging.getLogger("my_logger")
+log.setLevel(logging.INFO)
+
+
+def is_debug():
+    return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
+
 
 # From: https://stackoverflow.com/a/11541450
 def is_valid_file(parser, arg):
@@ -86,9 +92,7 @@ def get_arguments():
         default=1000,
         help="Slurm maximum job array size",
     )
-    parser.add_argument(
-        "-d", "--debug", action="store_true", help="print debug messages to stderr"
-    )
+
     parser.add_argument(
         "--db",
         dest="db",
@@ -118,6 +122,9 @@ def get_arguments():
         "--copy",
         action="store_true",
         required="--out-dir" in " ".join(sys.argv),
+    )
+    parser.add_argument(
+        "-d", "--debug", action="store_true", help="print debug messages to stderr"
     )
     parser.add_argument(
         "--out-dir",
@@ -160,13 +167,13 @@ def load_classifications(tax_file):
 
 
 def find_all_assemblies(in_dir):
-    logging.info("Finding assemblies in {}".format(in_dir))
+    log.info("Finding assemblies in {}".format(in_dir))
     all_assemblies = [
         str(x)
         for x in sorted(pathlib.Path(in_dir).absolute().glob("**/*"))
         if x.is_file()
     ]
-    logging.info("Found {:,} files in {}".format(len(all_assemblies), in_dir))
+    log.info("Found {:,} files in {}".format(len(all_assemblies), in_dir))
     return all_assemblies
 
 

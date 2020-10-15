@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 import pandas as pd
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
-
 tables = [
     "taxa",
     "genomes",
@@ -15,6 +13,8 @@ tables = [
     "results",
     "jobs_done",
 ]
+
+log = logging.getLogger("my_logger")
 
 
 def _path_to_uri(path):
@@ -28,10 +28,10 @@ def check_if_db_exists(db):
     uri = _path_to_uri(db) + "?mode=rw"
     try:
         con = sqlite3.connect(uri, uri=True, isolation_level="EXCLUSIVE")
-        logging.info("Found DB in {}".format(db))
+        log.info("Found DB in {}".format(db))
 
     except sqlite3.OperationalError:
-        logging.info("DB not found. Creating it")
+        log.info("DB not found. Creating it")
         con = sqlite3.connect(db, isolation_level="EXCLUSIVE")
     return con
 
@@ -106,7 +106,7 @@ def check_db_tables(con):
     db_tables = cursor.fetchall()
     db_tables = [table[0] for table in db_tables]
     if set(tables) != set(db_tables):
-        logging.info("DB has incorrect tables. Dropping tables and recreating DB")
+        log.info("DB has incorrect tables. Dropping tables and recreating DB")
         for table in db_tables:
             con.execute("DROP TABLE %s" % table)
         try:
@@ -114,9 +114,9 @@ def check_db_tables(con):
         except:
             pass
         create_db_tables(con)
-        logging.info("DB has been recreated")
+        log.info("DB has been recreated")
     else:
-        logging.info("DB tables seem to be OK")
+        log.info("DB tables seem to be OK")
 
 
 def db_insert_taxa(con, taxon):
