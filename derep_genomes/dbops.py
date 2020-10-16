@@ -295,3 +295,40 @@ def check_done_files_exists(files_done, out_dir):
         else:
             return False
     return is_file
+
+
+def delete_from_db(taxons, con):
+    # first get accessions from the taxon of interest
+    taxons = taxons["taxon"].tolist()
+
+    placeholders = ", ".join(["?" for _ in taxons])
+    query = "SELECT * FROM jobs_done WHERE taxon in ({});".format(placeholders)
+
+    jobs_done = pd.read_sql_query(query, con, params=(taxons))
+
+    cur = con.cursor()
+    # Delete from taxa
+    query = "DELETE FROM taxa WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from jobs_done
+    query = "DELETE FROM jobs_done WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from genomes
+    query = "DELETE FROM genomes WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from results
+    query = "DELETE FROM results WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from genomes_derep
+    accs = jobs_done["accession"].tolist()
+    placeholders = ", ".join(["?" for _ in accs])
+    query = "DELETE FROM genomes_derep WHERE accession in ({});".format(placeholders)
+
+    cur.execute(query, accs)
+
+    con.commit()
+    return jobs_done

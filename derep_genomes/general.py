@@ -16,7 +16,6 @@ from os import devnull
 import tqdm
 from derep_genomes import __version__
 
-COPY = False
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
@@ -141,11 +140,6 @@ def get_arguments():
         help="print debug messages to stderr",
     )
     args = parser.parse_args()
-
-    global COPY
-    global DEBUG
-    COPY = args.copy
-    DEBUG = args.debug
 
     return args
 

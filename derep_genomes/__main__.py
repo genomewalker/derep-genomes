@@ -51,15 +51,17 @@ from derep_genomes.dbops import (
     check_if_done,
     retrieve_all_taxa_analyzed,
     retrieve_all_jobs_done,
+    delete_from_db,
 )
 from multiprocessing import Pool
 import tqdm
 from functools import partial
 import pandas as pd
-
-COPY = False
+import time
+import tempfile
 
 log = logging.getLogger("my_logger")
+timestr = time.strftime("%Y%m%d-%H%M%S")
 
 
 def process_one_taxon(taxon, parms):
@@ -104,7 +106,7 @@ def process_one_taxon(taxon, parms):
         return derep_assemblies, results
 
 
-def insert_to_db(derep_assemblies, results, con, threads, out_dir):
+def insert_to_db(derep_assemblies, results, con, threads, out_dir, copy):
     query = check_existing(
         df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
         columns=["taxon"],
@@ -157,25 +159,43 @@ def insert_to_db(derep_assemblies, results, con, threads, out_dir):
         con.commit()
     except:
         pass
-    for assembly in derep_assemblies:
-        log.debug("{} -> {}".format(assembly, out_dir))
-        if COPY:
-            log.info("Copying dereplicated assemblies to output directory")
-            files = pd.DataFrame()
-            files.loc[:, "src"] = derep_assemblies.loc[:, "assembly"]
-            files.loc[:, "dst"] = out_dir
-            files = list(files.itertuples(index=False, name=None))
-            if is_debug():
-                files = list(map(copy_files, files))
-            else:
-                p = Pool(threads)
-                files = list(
-                    tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
+    if copy:
+        files = pd.DataFrame()
+        files.loc[:, "src"] = derep_assemblies[derep_assemblies["derep"] == 1].loc[
+            :, "assembly"
+        ]
+        files.loc[:, "dst"] = out_dir
+        files = list(files.itertuples(index=False, name=None))
+        log.info(
+            "Copying dereplicated {:,} assemblies to output directory".format(
+                len(files)
+            )
+        )
+
+        if is_debug():
+            files = list(map(copy_files, files))
+        else:
+            p = Pool(threads)
+            files = list(
+                tqdm.tqdm(
+                    p.imap_unordered(copy_files, files),
+                    total=len(files),
+                    leave=False,
+                    ncols=80,
                 )
+            )
+
+        log.info(
+            "Dereplication complete. Jobs saved to DB and files copied to {}\n".format(
+                out_dir
+            )
+        )
+        return
     log.info("Dereplication complete. Jobs saved to DB\n")
 
 
 def copy_files(src_dst):
+    log.debug("{} -> {}".format(src_dst[0], src_dst[1]))
     shutil.copy(src_dst[0], src_dst[1])
 
 
@@ -202,7 +222,7 @@ def insert_pd_sql(query, table, con):
         query.to_sql(name=table, con=con, if_exists="append", index=False)
 
 
-def process_sigletons(singletons, out_dir, threads, con):
+def process_sigletons(singletons, out_dir, threads, con, copy):
 
     # Insert data to table taxa
     query = check_existing(singletons, columns=["taxon"], table="taxa", con=con)
@@ -252,9 +272,9 @@ def process_sigletons(singletons, out_dir, threads, con):
     except:
         pass
 
-    if COPY:
+    if copy:
         log.info(
-            "Copying {} files with singletons to {}".format(
+            "Copying {} files with singletons to {}\n".format(
                 singletons.shape[0], out_dir
             )
         )
@@ -268,7 +288,12 @@ def process_sigletons(singletons, out_dir, threads, con):
         else:
             p = Pool(threads)
             files = list(
-                tqdm.tqdm(p.imap_unordered(copy_files, files), total=len(files))
+                tqdm.tqdm(
+                    p.imap_unordered(copy_files, files),
+                    total=len(files),
+                    leave=False,
+                    ncols=80,
+                )
             )
 
 
@@ -319,6 +344,7 @@ def mute():
 
 
 def main():
+
     logging.basicConfig(
         level=logging.DEBUG, format="%(levelname)s ::: %(asctime)s ::: %(message)s"
     )
@@ -328,13 +354,15 @@ def main():
         logging.DEBUG if args.debug else logging.INFO
     )
 
-    COPY = args.copy
-
-    if COPY:
+    if args.copy:
         out_dir = pathlib.Path(args.out_dir).absolute()
         os.makedirs(out_dir, exist_ok=True)
 
+    in_dir = pathlib.Path(args.in_dir).absolute()
+
     tmp_dir = pathlib.Path(args.tmp_dir).absolute()
+    if not os.path.isdir(tmp_dir):
+        os.makedirs(tmp_dir, exist_ok=True)
 
     con = check_if_db_exists(args.db)
     db_empty = check_if_db_empty(con)
@@ -346,7 +374,7 @@ def main():
         log.info("Checking correct tables exist")
         check_db_tables(con)
 
-    all_assemblies = find_all_assemblies(args.in_dir)
+    all_assemblies = find_all_assemblies(in_dir)
     classifications = load_classifications(args.tax_file)
 
     log.info("Filtering taxa with assemblies")
@@ -370,9 +398,8 @@ def main():
 
     taxa_in_db = retrieve_all_taxa_analyzed(con)
     jobs_done = retrieve_all_jobs_done(con)
-    ntaxa = len(list(set(assm_data["taxon"])))
 
-    log.info("Found {:,}/{:,} taxa in the DB".format(taxa_in_db.shape[0], ntaxa))
+    log.info("Found {:,} taxa in the DB".format(taxa_in_db.shape[0]))
 
     log.info("Checking assemblies already processed")
 
@@ -382,21 +409,38 @@ def main():
         to_do = pd.concat(
             [assm_data.loc[:, ["accession", "file"]], jobs_done, jobs_done]
         ).drop_duplicates(keep=False)
+
         to_do = assm_data[assm_data["accession"].isin(to_do["accession"])]
-        to_rm = pd.concat(
-            [to_do.loc[:, ["taxon"]], taxa_in_db, taxa_in_db]
-        ).drop_duplicates(keep=False)
-        # TODO: create funtion that removes entries that need to be updated
-        log.info(
-            "{:,}/{:,} assemblies already processed".format(
-                to_do.shape[0], assm_data.shape[0]
+
+        log.info("{:,} assemblies already processed".format(jobs_done.shape[0]))
+        to_rm = pd.concat([to_do.loc[:, ["taxon"]].drop_duplicates(), taxa_in_db])
+        to_rm = to_rm[to_rm["taxon"].duplicated()].reset_index()
+
+        if not to_rm.empty:
+            log.info("Found {:,} taxa that need to be updated".format(to_rm.shape[0]))
+            removed = delete_from_db(taxons=to_rm, con=con)
+            print()
+            log.warning(
+                "Removed {:,} taxa and {:,} assemblies from DB\n".format(
+                    to_rm.shape[0], removed.shape[0]
+                )
             )
-        )
+            rfname = timestr + "-derep-genomes_removed-db-entries.tsv"
+            removed.to_csv(rfname, index=False, sep="\t")
+
     else:
         log.info("No jobs found in the database")
         to_do = assm_data
 
-    log.info("Finding singletons...")
+    assm_min = 2
+    assm_max = 10
+    print()
+    log.info(
+        "Splitting taxa in groups of singleton assemblies, between {}-{} and more than {} assemblies\n".format(
+            assm_min, assm_max, assm_max + 1
+        )
+    )
+
     taxon_counts = to_do.groupby("taxon", as_index=False)["taxon"].agg(
         {"count": "count"}
     )
@@ -407,13 +451,6 @@ def main():
     classification_singletons = to_do[
         to_do["taxon"].isin(classification_singletons)
     ].reset_index(drop=True)
-
-    # classifications_sorted_counts = taxon_counts[taxon_counts["count"] > 1].sort_values(
-    #     by=["count"], ascending=True
-    # )
-
-    assm_min = 2
-    assm_max = 5
 
     classification_small = taxon_counts[
         taxon_counts["count"].isin(range(assm_min, assm_max + 1))
@@ -427,13 +464,17 @@ def main():
         drop=True
     )
 
-    log.info("Processing {:,} singletons".format(classification_singletons.shape[0]))
     if not classification_singletons.empty:
+        print()
+        log.info(
+            "Processing {:,} singletons".format(classification_singletons.shape[0])
+        )
         process_sigletons(
             singletons=classification_singletons,
             out_dir=args.out_dir,
             threads=args.threads,
             con=con,
+            copy=args.copy,
         )
     else:
         log.info("No singletons found\n")
@@ -469,6 +510,8 @@ def main():
                 tqdm.tqdm(
                     p.imap_unordered(partial(process_one_taxon, parms=parms), taxons),
                     total=len(taxons),
+                    leave=False,
+                    ncols=80,
                 )
             )
 
@@ -480,11 +523,12 @@ def main():
             con=con,
             threads=args.threads,
             out_dir=args.out_dir,
+            copy=args.copy,
         )
 
     if not classification_large.empty:
         taxons = list(set(classification_large["taxon"]))
-        if args.slurm_info is not None:
+        if args.slurm_config is not None:
             log.info(
                 "Dereplicating {:,} taxa with more than 5 assemblies using SLURM".format(
                     len(taxons)
@@ -516,6 +560,8 @@ def main():
                 tqdm.tqdm(
                     map(partial(process_one_taxon, parms=parms_large), taxons),
                     total=len(taxons),
+                    leave=False,
+                    ncols=80,
                 )
             )
         derep_assemblies = pd.concat([x[0] for x in dfs])
@@ -526,8 +572,19 @@ def main():
             con=con,
             threads=args.threads,
             out_dir=args.out_dir,
+            copy=args.copy,
         )
-
+    fname = timestr + "-derep-genomes_results.tsv"
+    logging.info("Saving results to {}".format(fname))
+    jobs_done = retrieve_all_jobs_done(con)
+    jobs_done.loc[:, "src"] = jobs_done["file"].apply(lambda x: os.path.join(in_dir, x))
+    if not args.copy:
+        jobs_done.loc[:, "dst"] = ""
+    else:
+        jobs_done.loc[:, "dst"] = jobs_done["file"].apply(
+            lambda x: os.path.join(out_dir, x)
+        )
+    jobs_done[["taxon", "accession", "src", "dst"]].to_csv(fname, index=False, sep="\t")
     con.close()
 
 

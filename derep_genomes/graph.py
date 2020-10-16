@@ -220,13 +220,20 @@ def split_fixed_size(lst, n):
     return splits
 
 
-def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
+def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
     rfile = os.path.join(odir, "fastANI_out_jobs.txt")
     with open(rfile, "w") as outfile:
         for cmd in cmds:
             outfile.write("%s\n" % cmd)
 
-    slurm = Slurm(**yaml.load(open(slurm_config), Loader=yaml.FullLoader))
+    slurm = Slurm(
+        **yaml.load(open(slurm_config), Loader=yaml.FullLoader),
+        output=(
+            "{}/gderep-{}_{}.out".format(
+                tmp_dir, Slurm.JOB_ARRAY_MASTER_ID, Slurm.JOB_ARRAY_ID
+            )
+        )
+    )
 
     if len(cmds) > max_jobs_array:
         log.debug(
@@ -288,7 +295,7 @@ def dereplicate(
     n_assemblies = all_assemblies.shape[0]
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
 
-        if n_assemblies < 6 or slurm_config is None:
+        if n_assemblies < 10 or slurm_config is None:
             if (n_assemblies * n_assemblies) < threads:
                 threads = n_assemblies * n_assemblies
             log.debug(
@@ -321,7 +328,7 @@ def dereplicate(
             cmds, ofiles, odir = create_slurm_commands(files, wdir)
             # Run slurm array job
             slurm_jobs = map_slurm_jobs(
-                cmds, ofiles, slurm_config, odir, max_jobs_array
+                cmds, ofiles, slurm_config, odir, max_jobs_array, temp_dir
             )
             log.debug("Reducing SLURM jobs and processing ANI results")
             pairwise_distances = reduce_slurm_jobs(ofiles, threads)
@@ -405,10 +412,10 @@ def dereplicate(
     # all_assemblies = all_assemblies[
     #     all_assemblies["assembly"].isin(derep_assemblies)
     # ]
-    all_assemblies.loc[:, "derep"] = 0
+    all_assemblies.loc[:, "representative"] = 0
     all_assemblies.loc[all_assemblies["accession"].isin(rep_keys), "representative"] = 1
 
-    all_assemblies.loc[:, "representative"] = 0
+    all_assemblies.loc[:, "derep"] = 0
     all_assemblies.loc[all_assemblies["assembly"].isin(derep_assemblies), "derep"] = 1
 
     return all_assemblies, results
