@@ -12,3 +12,7 @@ derep_genomes
 
 
 A simple genome de-replication tool with fastANI
+
+## Installation
+
+Create a conda env

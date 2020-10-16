@@ -8,13 +8,22 @@ import pathlib
 import collections
 import textwrap
 import logging
-from contextlib import contextmanager
-
+import pandas as pd
+from multiprocessing import Pool
+from functools import partial
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
+from os import devnull
+import tqdm
 from derep_genomes import __version__
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
-COPY = False
-DEBUG = False
+
+log = logging.getLogger("my_logger")
+log.setLevel(logging.INFO)
+
+
+def is_debug():
+    return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
+
 
 # From: https://stackoverflow.com/a/11541450
 def is_valid_file(parser, arg):
@@ -82,9 +91,7 @@ def get_arguments():
         default=1000,
         help="Slurm maximum job array size",
     )
-    parser.add_argument(
-        "-d", "--debug", action="store_true", help="print debug messages to stderr"
-    )
+
     parser.add_argument(
         "--db",
         dest="db",
@@ -116,6 +123,9 @@ def get_arguments():
         required="--out-dir" in " ".join(sys.argv),
     )
     parser.add_argument(
+        "-d", "--debug", action="store_true", help="print debug messages to stderr"
+    )
+    parser.add_argument(
         "--out-dir",
         dest="out_dir",
         type=str,
@@ -130,11 +140,6 @@ def get_arguments():
         help="print debug messages to stderr",
     )
     args = parser.parse_args()
-
-    global COPY
-    global DEBUG
-    COPY = args.copy
-    DEBUG = args.debug
 
     return args
 
@@ -156,13 +161,13 @@ def load_classifications(tax_file):
 
 
 def find_all_assemblies(in_dir):
-    logging.info("Finding assemblies in {}".format(in_dir))
+    log.info("Finding assemblies in {}".format(in_dir))
     all_assemblies = [
         str(x)
         for x in sorted(pathlib.Path(in_dir).absolute().glob("**/*"))
         if x.is_file()
     ]
-    logging.info("Found {:,} files in {}".format(len(all_assemblies), in_dir))
+    log.info("Found {:,} files in {}".format(len(all_assemblies), in_dir))
     return all_assemblies
 
 
@@ -274,10 +279,17 @@ def get_contig_lengths(filename):
 
 @contextmanager
 def suppress_stdout():
-    with open(os.devnull, "w") as devnull:
-        old_stdout = sys.stdout
-        sys.stdout = devnull
-        try:
-            yield
-        finally:
-            sys.stdout = old_stdout
+    """A context manager that redirects stdout and stderr to devnull"""
+    with open(devnull, "w") as fnull:
+        with redirect_stderr(fnull) as err, redirect_stdout(fnull) as out:
+            yield (err, out)
+
+
+def applyParallel(dfGrouped, func, threads, parms):
+    p = Pool(threads)
+    func = partial(func, parms=parms)
+    ret_list = tqdm.tqdm(
+        p.map(func, [group for name, group in dfGrouped]),
+        total=len([group for name, group in dfGrouped]),
+    )
+    return pd.concat(ret_list)

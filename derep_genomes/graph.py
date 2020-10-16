@@ -11,8 +11,7 @@ from derep_genomes.general import (
     get_open_func,
     get_assembly_length,
     get_contig_lengths,
-    DEBUG,
-    COPY,
+    is_debug,
 )
 import logging
 from pathlib import Path
@@ -24,7 +23,7 @@ from multiprocessing import Pool
 import tqdm
 import io, sys
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+log = logging.getLogger("my_logger")
 
 
 def pairwise_fastANI(assemblies, threads, temp_dir):
@@ -89,17 +88,17 @@ def binary_search_filter(g, low, high, weights):
             if float(d["weight"]) <= float(weights[mid])
         ]
         x.remove_edges_from(edges2rm)
-        if DEBUG:
-            logging.info(
-                "Filtering -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
-                    low,
-                    mid,
-                    high,
-                    weights[mid],
-                    nx.number_connected_components(x),
-                    x.number_of_edges(),
-                )
+
+        log.debug(
+            "Filtering -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
+                low,
+                mid,
+                high,
+                weights[mid],
+                nx.number_connected_components(x),
+                x.number_of_edges(),
             )
+        )
 
         if (mid - low) == 0:
             edges2rm = [
@@ -108,21 +107,22 @@ def binary_search_filter(g, low, high, weights):
                 if float(d["weight"]) <= float(weights[mid])
             ]
             x.remove_edges_from(edges2rm)
-            if DEBUG:
-                logging.info(
-                    "Final -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
-                        low,
-                        mid,
-                        high,
-                        weights[mid],
-                        nx.number_connected_components(x),
-                        x.number_of_edges(),
-                    )
+
+            log.debug(
+                "Final -> low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
+                    low,
+                    mid,
+                    high,
+                    weights[mid],
+                    nx.number_connected_components(x),
+                    x.number_of_edges(),
                 )
+            )
             if nx.number_connected_components(x) == 1:
                 return x, weights[mid]
             else:
-                logging.info(
+
+                log.debug(
                     "Couldn't find a filtering threshold, returning original graph"
                 )
                 return g, None
@@ -134,22 +134,22 @@ def binary_search_filter(g, low, high, weights):
                 if float(d["weight"]) <= float(weights[mid + 1])
             ]
             x.remove_edges_from(edges2rm)
-            if DEBUG:
-                logging.info(
-                    "low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
-                        low,
-                        mid,
-                        high,
-                        weights[mid],
-                        nx.number_connected_components(x),
-                        x.number_of_edges(),
-                    )
+
+            logging.debug(
+                "low: {} mid: {} high: {} mid_weight: {} components: {} edges: {}".format(
+                    low,
+                    mid,
+                    high,
+                    weights[mid],
+                    nx.number_connected_components(x),
+                    x.number_of_edges(),
                 )
+            )
             if nx.number_connected_components(x) == 1:
-                print(nx.number_connected_components(x))
                 return x, weights[mid]
             else:
-                logging.info(
+
+                log.debug(
                     "Couldn't find a filtering threshold, returning original graph"
                 )
                 return g, None
@@ -162,9 +162,7 @@ def binary_search_filter(g, low, high, weights):
         if nx.number_connected_components(x) == 1:
             return x, w
         else:
-            logging.info(
-                "Couldn't find a filtering threshold, returning original graph"
-            )
+            log.debug("Couldn't find a filtering threshold, returning original graph")
             return g, None
 
 
@@ -222,16 +220,23 @@ def split_fixed_size(lst, n):
     return splits
 
 
-def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
+def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
     rfile = os.path.join(odir, "fastANI_out_jobs.txt")
     with open(rfile, "w") as outfile:
         for cmd in cmds:
             outfile.write("%s\n" % cmd)
 
-    slurm = Slurm(**yaml.load(slurm_config, Loader=yaml.FullLoader))
+    slurm = Slurm(
+        **yaml.load(open(slurm_config), Loader=yaml.FullLoader),
+        output=(
+            "{}/gderep-{}_{}.out".format(
+                tmp_dir, Slurm.JOB_ARRAY_MASTER_ID, Slurm.JOB_ARRAY_ID
+            )
+        )
+    )
 
     if len(cmds) > max_jobs_array:
-        logging.info(
+        log.debug(
             "The number of jobs ({}) is larger than the allowed array size ({}). Splitting jobs..".format(
                 len(cmds), max_jobs_array
             )
@@ -239,7 +244,7 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
 
     job_ranges = split_fixed_size(range(1, len(cmds) + 1), max_jobs_array)
     job_ids = []
-    logging.info(
+    log.debug(
         "Mapping {} jobs to SLURM in {} batch(es)".format(len(cmds), len(job_ranges))
     )
     for r in job_ranges:
@@ -256,17 +261,18 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array):
 
 
 def reduce_slurm_jobs(ofiles, threads):
-    if DEBUG:
+    if is_debug():
         dfs = list(map(process_fastANI_results, ofiles))
     else:
         p = Pool(threads)
-        dfs = list(
-            tqdm.tqdm(
-                p.imap_unordered(process_fastANI_results, ofiles), total=len(ofiles)
-            )
-        )
+        dfs = list(p.imap_unordered(process_fastANI_results, ofiles))
     dfs = pd.concat(dfs)
     return dfs
+
+
+def is_unique(s):
+    a = s.to_numpy()  # s.values (pandas<0.24)
+    return (a[0] == a).all()
 
 
 def dereplicate(
@@ -284,14 +290,15 @@ def dereplicate(
     2. Dynamically filters the ANI graph
     3.
     """
+
     derep_assemblies = []
     n_assemblies = all_assemblies.shape[0]
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
 
-        if n_assemblies <= 10 or slurm_config is None:
+        if n_assemblies < 10 or slurm_config is None:
             if (n_assemblies * n_assemblies) < threads:
                 threads = n_assemblies * n_assemblies
-            logging.info(
+            log.debug(
                 "Found {} assemblies, using default fastANI with {} threads".format(
                     n_assemblies, threads
                 )
@@ -301,16 +308,16 @@ def dereplicate(
                 threads=threads,
                 temp_dir=temp_dir,
             )
-            logging.info("Processing ANI results")
+            log.debug("Processing ANI results")
             pairwise_distances = process_fastANI_results(ani_results)
         else:
             n = chunks
-            chunks = split_fixed_size(all_assemblies["assemblies"].tolist(), n)
+            chunks = split_fixed_size(all_assemblies["assembly"].tolist(), n)
             # chunks = [
             #     all_assemblies[i * n : (i + 1) * n]
             #     for i in range((len(all_assemblies) + n - 1) // n)
             # ]
-            logging.info(
+            log.debug(
                 "Found {} assemblies, creating {} chunks with {} genomes".format(
                     len(all_assemblies), len(chunks), n
                 )
@@ -321,12 +328,12 @@ def dereplicate(
             cmds, ofiles, odir = create_slurm_commands(files, wdir)
             # Run slurm array job
             slurm_jobs = map_slurm_jobs(
-                cmds, ofiles, slurm_config, odir, max_jobs_array
+                cmds, ofiles, slurm_config, odir, max_jobs_array, temp_dir
             )
-            logging.info("Reducing SLURM jobs and processing ANI results")
+            log.debug("Reducing SLURM jobs and processing ANI results")
             pairwise_distances = reduce_slurm_jobs(ofiles, threads)
         # Convert pw dist to graph
-        logging.info("Generating ANI graph")
+        log.debug("Generating ANI graph")
         M = nx.from_pandas_edgelist(
             pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
         )
@@ -346,18 +353,17 @@ def dereplicate(
             weights.append(d["weight"])
 
         weights = sorted(set(weights))
-        logging.info("Filtering ANI graph")
+        log.debug("Filtering ANI graph")
         G_filt, w_filt = binary_search_filter(
             g=G, low=0, high=len(weights) - 1, weights=weights
         )
 
-        logging.info(
+        log.debug(
             "Finding genome representatives using Louvain + eigenvector centrality"
         )
 
         partition = community_louvain.best_partition(G_filt, resolution=1.0)
-
-        logging.info(
+        log.debug(
             "Graph properties: w_filt={} components={} edges={} communities={}".format(
                 w_filt,
                 nx.number_connected_components(G_filt),
@@ -365,7 +371,7 @@ def dereplicate(
                 len(set([partition[k] for k in partition])),
             )
         )
-        logging.info(
+        log.debug(
             "Refining genome selection (length difference and fraction aligned, z-score={})".format(
                 threshold
             )
@@ -386,8 +392,7 @@ def dereplicate(
             else:
                 derep_assemblies = candidates
     derep_assemblies = list(set(derep_assemblies))
-
-    logging.info(
+    log.debug(
         "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
     )
     results = pd.DataFrame(
@@ -407,10 +412,10 @@ def dereplicate(
     # all_assemblies = all_assemblies[
     #     all_assemblies["assembly"].isin(derep_assemblies)
     # ]
-    all_assemblies.loc[:, "derep"] = 0
+    all_assemblies.loc[:, "representative"] = 0
     all_assemblies.loc[all_assemblies["accession"].isin(rep_keys), "representative"] = 1
 
-    all_assemblies.loc[:, "representative"] = 0
+    all_assemblies.loc[:, "derep"] = 0
     all_assemblies.loc[all_assemblies["assembly"].isin(derep_assemblies), "derep"] = 1
 
     return all_assemblies, results
@@ -459,8 +464,15 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
         else:
             assms = [rep]
     else:
-        df["z_score_aln"] = stats.zscore(df["aln_frac"])
-        df["z_score_diff"] = stats.zscore(df["len_diff"])
+        if is_unique(df["aln_frac"]):
+            df["z_score_aln"] = 0
+        else:
+            df["z_score_aln"] = stats.zscore(df["aln_frac"])
+        if is_unique(df["len_diff"]):
+            df["z_score_diff"] = 0
+        else:
+            df["z_score_diff"] = stats.zscore(df["len_diff"])
+
         df = df[
             (df["z_score_aln"] <= (-1 * threshold))
             | (df["z_score_diff"].abs() >= threshold)

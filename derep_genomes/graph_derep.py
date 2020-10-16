@@ -47,7 +47,7 @@ from derep_genomes.dbops import (
     check_if_done,
 )
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
+log = logging.getLogger("my_logger")
 
 
 def process_one_taxon(
@@ -66,17 +66,17 @@ def process_one_taxon(
 ):
     accessions = sorted(accessions)
     print()
-    logging.info("Dereplicating {}".format(classification))
+    log.info("Dereplicating {}".format(classification))
     acc_to_assemblies = find_assemblies_for_accessions(accessions, all_assemblies)
 
     # check if already processed
-    logging.info("Retrieving jobs done")
+    log.info("Retrieving jobs done")
     is_done = check_if_done(
         con=con, taxon=classification, acc2assm=acc_to_assemblies, out_dir=out_dir
     )
 
     if is_done:
-        logging.info("Taxon already processed")
+        log.info("Taxon already processed")
         return
 
     if len(acc_to_assemblies) == 0:
@@ -85,7 +85,7 @@ def process_one_taxon(
         rep = str(next(iter(acc_to_assemblies.keys())))
         only_assembly = list(acc_to_assemblies.values())[0]
 
-        logging.info("Only one assembly for this species, copying to output directory:")
+        log.info("Only one assembly for this species, copying to output directory:")
         if debug:
             print("{} -> {}".format(only_assembly, out_dir))
         shutil.copy(only_assembly, out_dir)
@@ -94,7 +94,7 @@ def process_one_taxon(
         # add results
         # add job done
 
-        logging.info("Saving data in DB")
+        log.info("Saving data in DB")
         db_insert_taxa(con=con, taxon=classification)
         db_insert_genomes(con=con, taxon=classification, acc2assm=acc_to_assemblies)
         db_insert_genomes_derep(
@@ -118,10 +118,10 @@ def process_one_taxon(
             con.commit()
         except:
             pass
-        logging.info("Dereplication complete. Job saved in DB")
+        log.info("Dereplication complete. Job saved in DB")
 
     else:
-        logging.info(
+        log.info(
             "{:,} assemblies for this species, clustering to dereplicate.".format(
                 len(acc_to_assemblies)
             )
@@ -137,13 +137,13 @@ def process_one_taxon(
             max_jobs_array,
             con,
         )
-        logging.info("Copying dereplicated assemblies to output directory")
+        log.info("Copying dereplicated assemblies to output directory")
         for assembly in derep_assemblies:
             if debug:
                 print("{} -> {}".format(assembly, out_dir))
             shutil.copy(assembly, out_dir)
 
-        logging.info("Saving data in DB")
+        log.info("Saving data in DB")
         db_insert_taxa(con=con, taxon=classification)
         db_insert_genomes(con=con, taxon=classification, acc2assm=acc_to_assemblies)
         db_insert_genomes_derep(
@@ -167,7 +167,7 @@ def process_one_taxon(
             con.commit()
         except:
             pass
-        logging.info("Dereplication complete. Job saved in DB")
+        log.info("Dereplication complete. Job saved in DB")
 
 
 def main():
@@ -179,10 +179,10 @@ def main():
     db_empty = check_if_db_empty(con)
 
     if db_empty:
-        logging.info("Creating db tables")
+        log.info("Creating db tables")
         create_db_tables(con)
     else:
-        logging.info("Checking correct tables exist")
+        log.info("Checking correct tables exist")
         check_db_tables(con)
 
     all_assemblies = find_all_assemblies(args.in_dir)

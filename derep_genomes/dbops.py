@@ -6,8 +6,6 @@ import os
 from pathlib import Path
 import pandas as pd
 
-logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.DEBUG)
-
 tables = [
     "taxa",
     "genomes",
@@ -15,6 +13,8 @@ tables = [
     "results",
     "jobs_done",
 ]
+
+log = logging.getLogger("my_logger")
 
 
 def _path_to_uri(path):
@@ -28,10 +28,10 @@ def check_if_db_exists(db):
     uri = _path_to_uri(db) + "?mode=rw"
     try:
         con = sqlite3.connect(uri, uri=True, isolation_level="EXCLUSIVE")
-        logging.info("Found DB in {}".format(db))
+        log.info("Found DB in {}".format(db))
 
     except sqlite3.OperationalError:
-        logging.info("DB not found. Creating it")
+        log.info("DB not found. Creating it")
         con = sqlite3.connect(db, isolation_level="EXCLUSIVE")
     return con
 
@@ -106,7 +106,7 @@ def check_db_tables(con):
     db_tables = cursor.fetchall()
     db_tables = [table[0] for table in db_tables]
     if set(tables) != set(db_tables):
-        logging.info("DB has incorrect tables. Dropping tables and recreating DB")
+        log.info("DB has incorrect tables. Dropping tables and recreating DB")
         for table in db_tables:
             con.execute("DROP TABLE %s" % table)
         try:
@@ -114,9 +114,9 @@ def check_db_tables(con):
         except:
             pass
         create_db_tables(con)
-        logging.info("DB has been recreated")
+        log.info("DB has been recreated")
     else:
-        logging.info("DB tables seem to be OK")
+        log.info("DB tables seem to be OK")
 
 
 def db_insert_taxa(con, taxon):
@@ -223,9 +223,30 @@ def retrieve_jobs_done(con, taxon):
         return pd.DataFrame()
 
 
+def retrieve_all_jobs_done(con):
+    query = "SELECT * from jobs_done"
+    jobs = pd.read_sql(query, con)
+
+    if not jobs.empty:
+        return jobs
+    else:
+        return pd.DataFrame()
+
+
 def retrieve_taxa_analyzed(con, taxon):
     query = "SELECT * from genomes where taxon =?"
     taxons = pd.read_sql(query, con, params=(taxon,))
+
+    if not taxons.empty:
+        # accessions = [str(k[1]) for k in jobs]
+        return taxons
+    else:
+        return pd.DataFrame()
+
+
+def retrieve_all_taxa_analyzed(con):
+    query = "SELECT * from taxa"
+    taxons = pd.read_sql(query, con)
 
     if not taxons.empty:
         # accessions = [str(k[1]) for k in jobs]
@@ -274,3 +295,40 @@ def check_done_files_exists(files_done, out_dir):
         else:
             return False
     return is_file
+
+
+def delete_from_db(taxons, con):
+    # first get accessions from the taxon of interest
+    taxons = taxons["taxon"].tolist()
+
+    placeholders = ", ".join(["?" for _ in taxons])
+    query = "SELECT * FROM jobs_done WHERE taxon in ({});".format(placeholders)
+
+    jobs_done = pd.read_sql_query(query, con, params=(taxons))
+
+    cur = con.cursor()
+    # Delete from taxa
+    query = "DELETE FROM taxa WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from jobs_done
+    query = "DELETE FROM jobs_done WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from genomes
+    query = "DELETE FROM genomes WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from results
+    query = "DELETE FROM results WHERE taxon in ({});".format(placeholders)
+    cur.execute(query, taxons)
+
+    # Delete from genomes_derep
+    accs = jobs_done["accession"].tolist()
+    placeholders = ", ".join(["?" for _ in accs])
+    query = "DELETE FROM genomes_derep WHERE accession in ({});".format(placeholders)
+
+    cur.execute(query, accs)
+
+    con.commit()
+    return jobs_done
