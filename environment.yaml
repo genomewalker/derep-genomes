@@ -4,5 +4,5 @@ channels:
   - bioconda
   - defaults
 dependencies:
-  -fastANI
-  -python>=3.6
+  - fastANI
+  - python>=3.6

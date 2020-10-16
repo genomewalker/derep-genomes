@@ -10,6 +10,14 @@ A simple genome de-replication tool with fastANI
 
 ## Installation
 
+Clone the repo:
+
+```bash
+git clone https://github.com/genomewalker/derep-genomes.git
+cd derep-genomes
+```
+
+
 Create a conda env:
 
 ```bash
@@ -17,14 +25,7 @@ conda env create -f environment.yaml
 conda activate genome-derep
 ```
 
-Clone the repo:
-
-```bash
-git clone https://github.com/genomewalker/derep-genomes.git
-```
-
 Install it:
 ```bash
-cd derep-genomes
 python setup.py install 
 ```
