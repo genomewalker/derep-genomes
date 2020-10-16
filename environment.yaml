@@ -1,0 +1,8 @@
+name: genome-derep
+channels:
+  - conda-forge
+  - bioconda
+  - defaults
+dependencies:
+  -fastANI
+  -python>=3.6
