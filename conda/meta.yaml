@@ -37,5 +37,5 @@ test:
 about:
   home: https://github.com/genomewalker/derep-genomes
   summary: "A simple genome de-replication tool with fastANI"
-  license: {{ data('license') }}
+  license: {{ setup_data['license'] }}
   license_file: LICENSE
