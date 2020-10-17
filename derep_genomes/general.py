@@ -48,7 +48,7 @@ def get_arguments():
         required=True,
         metavar="DIR",
         type=lambda x: is_valid_file(parser, x),
-        help="Directory containing all GTDB assemblies",
+        help="Directory containing all assemblies",
     )
     parser.add_argument(
         "--tmp",
@@ -63,7 +63,7 @@ def get_arguments():
         metavar="FILE",
         type=lambda x: is_valid_file(parser, x),
         dest="tax_file",
-        help="GTDB taxonomy file",
+        help="Taxonomy file",
     )
     parser.add_argument(
         "-t",

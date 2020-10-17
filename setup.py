@@ -22,7 +22,7 @@ setup(
     author_email="antonio@metagenomics.eu",
     url="https://github.com/genomewalker/derep-genomes",
     packages=["derep_genomes"],
-    entry_points={"console_scripts": ["derep-genomes=derep_genomes.__main__:main"]},
+    entry_points={"console_scripts": ["derepG=derep_genomes.__main__:main"]},
     install_requires=requirements,
     keywords="derep-genomes",
     classifiers=[
