@@ -39,7 +39,7 @@ def is_valid_file(parser, arg):
             return arg
 
 
-def get_arguments():
+def get_arguments(argv=None):
 
     parser = argparse.ArgumentParser(description="Cluster assemblies in each taxon")
     parser.add_argument(

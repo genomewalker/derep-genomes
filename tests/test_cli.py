@@ -1,5 +1,8 @@
-import derep_genomes.__main__
+import pytest
+from derep_genomes.general import get_arguments
 
 
 def test_main_template():
-    assert derep_genomes.main() is None
+    with pytest.raises(SystemExit) as pytest_wrapped_e:
+        get_arguments()
+    assert pytest_wrapped_e.type == SystemExit
