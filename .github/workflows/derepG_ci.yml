@@ -27,7 +27,7 @@ jobs:
         shell: bash -l {0}
         run: |
           pip install -e .
-          pip install pytest
+          pip install pytest pytest-cov
           pytest
       - name: Check derepG help message
         shell: bash -l {0}
