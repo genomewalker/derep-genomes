@@ -31,10 +31,10 @@ requirements:
     
 test:
   commands:
-    - derepG --help
+    - derepG -h
 
 about:
   home: https://github.com/genomewalker/derep-genomes
-  summary: A simple genome de-replication tool with fastANI
+  summary: "A simple genome de-replication tool with fastANI"
   license: {{ setup_py.get('license') }}
   license_file: LICENSE
