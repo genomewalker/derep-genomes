@@ -1,4 +1,4 @@
-name: genome-derep
+name: derep-genomes
 channels:
   - conda-forge
   - bioconda

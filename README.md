@@ -9,44 +9,16 @@ A simple genome de-replication tool with fastANI
 
 ## Installation
 
-Clone the repo:
-
-```bash
-git clone https://github.com/genomewalker/derep-genomes.git
-cd derep-genomes
-```
-
-
-Create a conda env:
-
-```bash
-conda env create -f environment.yaml
-conda activate genome-derep
-```
-
-Install it:
-```bash
-python setup.py install 
-```
-
-
-# PyDamage
-
-Pydamage, is a Python software to automate the process of contig damage identification and estimation.
-After modelling the ancient DNA damage using the C to T transitions, Pydamage uses a likelihood ratio test to discriminate between truly ancient, and modern contigs originating from sample contamination.
-
-## Installation
-
 ### With [conda](https://docs.conda.io/en/latest/) (recommended)
 
 ```bash
-conda install -c conda-forge -c bioconda -c maxibor pydamage
+conda install -c conda-forge -c bioconda -c genomewalker derep-genomes
 ```
 
 ### With pip
 
 ```bash
-pip install pydamage
+pip install derep-genomes
 ```
 
 ### Install from source to use the development version
@@ -54,35 +26,16 @@ pip install pydamage
 Using pip
 
 ```bash
-pip install git+ssh://git@github.com/maxibor/pydamage.git@dev
+pip install git+ssh://git@github.com/genomewalker/derep-genomes.git@dev
 ```
 
 By cloning in a dedicated conda environment
 
 ```bash
-git clone git@github.com:maxibor/pydamage.git
-cd pydamage
+git clone git@github.com:genomewalker/derep-genomes.git
+cd derep-genomes
 git checkout dev
 conda env create -f environment.yml
-conda activate pydamage
+conda activate derep-genomes
 pip install -e .
 ```
-
-
-## Quick start
-
-```bash
-pydamage aligned.bam reference.fa
-```
-
-## CLI help
-
-Command line interface help message
-
-```bash
-pydamage --help
-```
-
-## Documentation
-
-[pydamage.readthedocs.io](https://pydamage.readthedocs.io)
