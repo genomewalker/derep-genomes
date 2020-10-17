@@ -1,0 +1,40 @@
+{% set setup_data = load_setup_py_data() %}
+package:
+  name: derep-genomes
+  version: {{ setup_data['version'] }}
+
+source:
+  git_rev: {{ setup_data['version'] }}
+  git_url: https://github.com/genomewalker/derep-genomes.git
+
+build:
+  number: 0
+  skip: true  # [win and py27 or win32]
+  script: {{ PYTHON }} -m pip install . --no-deps -vv
+
+requirements:
+  build:
+    - python
+    - setuptools
+    - pip
+  run:
+    - python>=3.7
+    - pandas>=1.1.2,
+    - python_louvain>=0.14
+    - scipy>=1.5.2
+    - networkx>=2.5
+    - Bio>=0.0.6
+    - simple_slurm==0.1.5
+    - tqdm==4.50.0
+    - PyYAML==5.3.1
+    - fastANI>=1.32
+    
+test:
+  commands:
+    - derepG --help
+
+about:
+  home: https://github.com/genomewalker/derep-genomes
+  summary: A simple genome de-replication tool with fastANI
+  license: {{ setup_py.get('license') }}
+  license_file: LICENSE

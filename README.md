@@ -2,8 +2,9 @@
 # derep_genomes
 
 
-[![Alt text](https://img.shields.io/travis/genomewalker/derep-genomes.svg)](https://travis-ci.org/genomewalker/derep-genomes)
-[![Alt text](https://codecov.io/gh/genomewalker/derep-genomes/branch/master/graph/badge.svg)](https://codecov.io/gh/genomewalker/derep-genomes)
+[![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/genomewalker/derep-genomes?include_prereleases&label=version)](https://github.com/genomewalker/derep-genomes/releases) 
+
+[![derep-genomes](https://github.com/genomewalker/derep-genomes/workflows/derepG_ci/badge.svg)](https://github.com/genomewalker/derep-genomes/actions) 
 
 
 A simple genome de-replication tool with fastANI
