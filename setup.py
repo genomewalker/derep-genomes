@@ -3,14 +3,13 @@ import versioneer
 
 requirements = [
     "pandas>=1.1.2",
-    "python_louvain>=0.14",
     "scipy>=1.5.2",
     "networkx>=2.5",
-    "Bio>=0.0.6",
     "simple_slurm==0.1.5",
     "tqdm==4.50.0",
     "PyYAML==5.3.1",
-    "cdlib[C]>=0.1.9"
+    "leidenalg>=0.8.2",
+    "python-igraph>=0.8.3",
 ]
 
 setup(

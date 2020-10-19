@@ -1,9 +1,9 @@
-import networkx as nx
 import math
 import tempfile
 from statistics import mean
-from community import community_louvain
-from cdlib import algorithms
+import leidenalg
+import networkx as nx
+import igraph as ig
 import pandas as pd
 from scipy import stats
 import subprocess
@@ -26,6 +26,52 @@ import tqdm
 import io, sys
 
 log = logging.getLogger("my_logger")
+
+# From https://github.com/GiulioRossetti/cdlib/blob/master/cdlib/utils.py#L79
+def __from_nx_to_igraph(g, directed=None):
+    """
+    :param g:
+    :param directed:
+    :return:
+    """
+
+    if ig is None:
+        raise ModuleNotFoundError(
+            "Optional dependency not satisfied: install igraph to use the selected feature."
+        )
+
+    if directed is None:
+        directed = g.is_directed()
+
+    gi = ig.Graph(directed=directed)
+
+    ## Two problems to handle:
+    # 1)in igraph, names have to be str.
+    # 2)since we can ask to compute metrics with found communities and the the original graph, we need to keep
+    # the original nodes types in communities. Therefore we need to handle some transparent conversion for non-str nodes
+    if type(list(g.nodes)[0]) is str:  # if nodes are string, no problem
+        gi.add_vertices([n for n in g.nodes()])
+        gi.add_edges([(u, v) for (u, v) in g.edges()])
+
+    else:
+        if set(range(len(g.nodes))) == set(
+            g.nodes()
+        ):  # if original names are well formed contiguous ints, keep this for efficiency.
+            # Put these int as str with identitiers in the name attribute
+            gi.add_vertices(len(g.nodes))
+            gi.add_edges([(u, v) for (u, v) in g.edges()])
+            gi.vs["name"] = ["\\" + str(n) for n in g.nodes()]
+        else:  # if names are not well formed ints, convert to string and use the identifier to remember
+            # converting back to int
+            # convert = {str(x):x for x in g.nodes()}
+            gi.add_vertices(["\\" + str(n) for n in g.nodes()])
+            gi.add_edges([("\\" + str(u), "\\" + str(v)) for (u, v) in g.edges()])
+
+    edgelist = nx.to_pandas_edgelist(g)
+    for attr in edgelist.columns[2:]:
+        gi.es[attr] = edgelist[attr]
+
+    return gi
 
 
 def pairwise_fastANI(assemblies, threads, temp_dir):
@@ -371,12 +417,14 @@ def dereplicate(
 
         for u, v, d in G_filt.edges(data=True):
             weights.append(d["weight"])
-        leiden_coms = algorithms.leiden(G_filt, weights="weight")
-        partition = {
-            k: i for i, sub_l in enumerate(leiden_coms.communities) for k in sub_l
-        }
 
-        log.debug("Summary: {}".format(leiden_coms.average_internal_degree()))
+        g = __from_nx_to_igraph(G_filt)
+
+        part = leidenalg.find_partition(
+            g, leidenalg.ModularityVertexPartition, weights="weight"
+        )
+        leiden_coms = [g.vs[x]["name"] for x in part]
+        partition = {k: i for i, sub_l in enumerate(leiden_coms) for k in sub_l}
 
         log.debug(
             "Graph properties: w_filt={} components={} edges={} communities={}".format(
