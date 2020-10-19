@@ -90,7 +90,7 @@ SLURM arguments:
 
 DeRepG uses an SQLite3 database to store the results and the different runs, so if it fails or you have a new set of genomes it doesn't need to rerun the whole dereplication.
 
-One limitation of DeRepG is that fastANI might not be fast when one wants to do all-vs-all comparisons in species with a large number of assemblies. In this case, if you don't want to wait for a long time and you have access to a computer cluster using SLURM it will distribute the fastANI comparisons over the cluster. Check the [SLURM](#using-derepg-with-slurm) section for more information
+One limitation of DeRepG is that fastANI might not be fast when one wants to do all-vs-all comparisons in species with a large number of assemblies. In this case, if you don't want to wait for a long time and you have access to a computer cluster using SLURM it will distribute the fastANI comparisons over the cluster. Check the [**SLURM**](#using-derepg-with-slurm) section for more information
 
 One would run DeRepG as:
 
@@ -111,10 +111,10 @@ derepG --in-dir data/genomes --taxa data/bac120_taxonomy_r95-1K.tsv --threads 32
 
 *--copy* and *--out-dir*: By default DeRepG will generate a TSV file with the kept assemblies and their location. By using *--copy* it will copy the files to the specified folder in *--out-dir*
 
-*--slurm-config*: Location of the SLURM configuration file. Check the [SLURM](#using-derepg-with-slurm) section for more info
+*--slurm-config*: Location of the SLURM configuration file. Check the [**SLURM**](#using-derepg-with-slurm) section for more info
 
 If everything goes well, you will have your files in the *--out-dir* and a summary file with the columns **taxon**, **accession**, **representative**, **src** and **dst**. If **--copy** has not been set, one can use this file to copy the assembly files a posteriori.
 
 ## Using DeRepG with SLURM
 
-Computing the similarities between a large number of genomes can be a time-consuming process. To speed up this step, DeRepG uses [**simple-slurm**](https://github.com/amq92/simple-slurm) to distribute the jobs over a computer cluster if available. By default, DeRepG generates all-vs-all fastANI commands, splits them in groups of n-chunks (**--chunk-size**) and distributes them as array jobs. An example of configuration file can be found [here](https://github.com/amq92/simple-slurm#using-configuration-files)
+Computing the similarities between a large number of genomes can be a time-consuming process. To speed up this step, DeRepG uses [**simple-slurm**](https://github.com/amq92/simple-slurm) to distribute the jobs over a computer cluster if available. By default, DeRepG generates all-vs-all fastANI commands, splits them in groups of n-chunks (**--chunk-size**) and distributes them as array jobs. An example of configuration file can be found [**here**](https://github.com/amq92/simple-slurm#using-configuration-files)
