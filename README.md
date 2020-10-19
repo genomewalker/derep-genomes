@@ -98,7 +98,7 @@ One would run DeRepG as:
 derepG --in-dir data/genomes --taxa data/bac120_taxonomy_r95-1K.tsv --threads 32 --tmp ./ --db test5k-1.db --copy --out-dir gtdb-derep-1k --slurm-config slurm.yaml
 ```
 
-*--in-dir*: Here we specify the location of the genomes
+*--in-dir*: Here we specify the location of the genomes in FASTA format (accepts gzipped files)
 
 *--taxa*: Ataxa file needs to have two columns like the one distributed by GTDB:
 > d__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Salmonella;s__Salmonella enterica
