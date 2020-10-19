@@ -26,7 +26,7 @@ requirements:
     - tqdm==4.50.0
     - PyYAML==5.3.1
     - fastANI>=1.32
-    - genomewalker::simple-slurm
+    - simple-slurm>=0.1.5
     - leidenalg>=0.8.2
     - python-igraph>=0.8.3
     
