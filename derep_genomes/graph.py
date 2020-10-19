@@ -3,6 +3,7 @@ import math
 import tempfile
 from statistics import mean
 from community import community_louvain
+from cdlib import algorithms
 import pandas as pd
 from scipy import stats
 import subprocess
@@ -11,6 +12,7 @@ from derep_genomes.general import (
     get_open_func,
     get_assembly_length,
     get_contig_lengths,
+    get_assembly_n50,
     is_debug,
 )
 import logging
@@ -57,13 +59,14 @@ def process_fastANI_results(rfile):
 
     df["aln_frac"] = df["frags"] / df["total_frags"]
     df["weight"] = df["ANI"].div(100)
-
+    df["weight"] = df["weight"] * df["aln_frac"]
     df1 = pd.DataFrame(
         set(df["source"].tolist() + df["target"].tolist()),
         columns=["assm"],
     )
 
     df1["len"] = df1["assm"].map(lambda x: get_assembly_length(x))
+    # df1["n50"] = df1["assm"].map(lambda x: get_assembly_n50(x))
 
     df = df.merge(df1.rename(columns={"assm": "source", "len": "source_len"}))
     df = df.merge(df1.rename(columns={"assm": "target", "len": "target_len"}))
@@ -345,24 +348,36 @@ def dereplicate(
                     d.get("weight", 1) for d in M.get_edge_data(u, v).values()
                 )
                 G.add_edge(u, v, weight=weight)
-
         G.remove_edges_from(nx.selfloop_edges(G))
-
         weights = []
         for u, v, d in G.edges(data=True):
             weights.append(d["weight"])
+        if len(weights) > 2:
+            weights = sorted(set(weights))
+            log.debug("Filtering ANI graph")
+            G_filt, w_filt = binary_search_filter(
+                g=G, low=0, high=len(weights) - 1, weights=weights
+            )
 
-        weights = sorted(set(weights))
-        log.debug("Filtering ANI graph")
-        G_filt, w_filt = binary_search_filter(
-            g=G, low=0, high=len(weights) - 1, weights=weights
-        )
+        else:
+            log.debug("Skipping graph filltering, number of edges <=2")
+            G_filt = G
+            w_filt = None
 
         log.debug(
             "Finding genome representatives using Louvain + eigenvector centrality"
         )
+        # partition = community_louvain.best_partition(G_filt, resolution=1.0)
 
-        partition = community_louvain.best_partition(G_filt, resolution=1.0)
+        for u, v, d in G_filt.edges(data=True):
+            weights.append(d["weight"])
+        leiden_coms = algorithms.leiden(G_filt, weights="weight")
+        partition = {
+            k: i for i, sub_l in enumerate(leiden_coms.communities) for k in sub_l
+        }
+
+        log.debug("Summary: {}".format(leiden_coms.average_internal_degree()))
+
         log.debug(
             "Graph properties: w_filt={} components={} edges={} communities={}".format(
                 w_filt,

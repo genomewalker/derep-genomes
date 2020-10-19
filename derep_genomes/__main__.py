@@ -52,6 +52,7 @@ from derep_genomes.dbops import (
     retrieve_all_taxa_analyzed,
     retrieve_all_jobs_done,
     delete_from_db,
+    retrieve_all_genomes_derep,
 )
 from multiprocessing import Pool
 import tqdm
@@ -457,7 +458,7 @@ def main():
         assm_max = 10
 
         log.info(
-            "Splitting taxa in groups of singleton assemblies, between {}-{} and more than {} assemblies\n".format(
+            "Splitting taxa in groups of singleton, between {}-{} and more than {} assemblies\n".format(
                 assm_min, assm_max, assm_max
             )
         )
@@ -480,7 +481,9 @@ def main():
             to_do["taxon"].isin(classification_small)
         ].reset_index(drop=True)
 
-        classification_large = taxon_counts[taxon_counts["count"] > 5]["taxon"].tolist()
+        classification_large = taxon_counts[taxon_counts["count"] > assm_max][
+            "taxon"
+        ].tolist()
         classification_large = to_do[
             to_do["taxon"].isin(classification_large)
         ].reset_index(drop=True)
@@ -553,8 +556,8 @@ def main():
             taxons = list(set(classification_large["taxon"]))
             if args.slurm_config is not None:
                 log.info(
-                    "Dereplicating {:,} taxa with more than 5 assemblies using SLURM".format(
-                        len(taxons)
+                    "Dereplicating {:,} taxa with more than {} assemblies using SLURM".format(
+                        len(taxons), assm_max
                     )
                 )
             else:
@@ -599,6 +602,8 @@ def main():
             )
 
         jobs_done = retrieve_all_jobs_done(con)
+        genomes_derep = retrieve_all_genomes_derep(con)
+        jobs_done = jobs_done.merge(genomes_derep)
         fname = timestr + "-derep-genomes_results.tsv"
         logging.info("Saving results to {}".format(fname))
         jobs_done.loc[:, "src"] = jobs_done["file"].apply(
@@ -610,7 +615,8 @@ def main():
             jobs_done.loc[:, "dst"] = jobs_done["file"].apply(
                 lambda x: os.path.join(out_dir, x)
             )
-        jobs_done[["taxon", "accession", "src", "dst"]].to_csv(
+        jobs_done["representative"] = jobs_done["representative"].astype(bool)
+        jobs_done[["taxon", "accession", "representative", "src", "dst"]].to_csv(
             fname, index=False, sep="\t"
         )
     else:

@@ -233,6 +233,16 @@ def retrieve_all_jobs_done(con):
         return pd.DataFrame()
 
 
+def retrieve_all_genomes_derep(con):
+    query = "SELECT * from genomes_derep"
+    jobs = pd.read_sql(query, con)
+
+    if not jobs.empty:
+        return jobs
+    else:
+        return pd.DataFrame()
+
+
 def retrieve_taxa_analyzed(con, taxon):
     query = "SELECT * from genomes where taxon =?"
     taxons = pd.read_sql(query, con, params=(taxon,))

@@ -39,107 +39,147 @@ def is_valid_file(parser, arg):
             return arg
 
 
+help_msg = {
+    "in_dir": "Directory containing all assemblies",
+    "tax_file": "TSV file with the taxonomic information",
+    "db": "SQLite3 DB to store the results",
+    "tmp": "Temporary directory",
+    "threads": "Number of threads (for fastANI)",
+    "threshold": "Z-score filtering threshold",
+    "slurm_config": "YAML configuration file for SLURM",
+    "chunks": "Number of genomes in each chunk for fastANI in SLURM",
+    "max_jobs_array": "Slurm maximum job array size",
+    "selected_taxa": "File with selected taxa. Taxa should have the following formar: d__;p__;c__;o__;f__;g__;s__",
+    "out_dir": "Directory where dereplicated assemblies will be copied",
+    "debug": "Print debug messages",
+    "version": "Print program version",
+}
+
+
 def get_arguments(argv=None):
 
-    parser = argparse.ArgumentParser(description="Cluster assemblies in each taxon")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="Cluster assemblies in each taxon",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    optional = parser._action_groups.pop()  # Edited this line
+    required = parser.add_argument_group("required arguments")
+    parser._action_groups.append(optional)  # added this line
+    slurm = parser.add_argument_group("SLURM arguments")
+
+    required.add_argument(
         "--in-dir",
         dest="in_dir",
+        default=argparse.SUPPRESS,
         required=True,
         metavar="DIR",
         type=lambda x: is_valid_file(parser, x),
-        help="Directory containing all assemblies",
+        help=help_msg["in_dir"],
     )
-    parser.add_argument(
-        "--tmp",
-        type=str,
-        default="/tmp",
-        dest="tmp_dir",
-        help="Tmp directory where dereplicated assemblies will be copied",
-    )
-    parser.add_argument(
+    required.add_argument(
         "--taxa",
         required=True,
         metavar="FILE",
+        default=argparse.SUPPRESS,
         type=lambda x: is_valid_file(parser, x),
         dest="tax_file",
-        help="Taxonomy file",
+        help=help_msg["tax_file"],
     )
-    parser.add_argument(
-        "-t",
-        "--threshold",
-        type=float,
-        default=2,
-        help="Z-score filtering threshold",
-    )
-    parser.add_argument(
-        "-p", "--threads", type=int, default=16, help="Number of threads (for fastANI)"
-    )
-    parser.add_argument(
-        "-c",
-        "--chunk-size",
-        dest="chunks",
-        type=int,
-        default=5,
-        help="Number of genomes in each chunk for fastANI in SLURM",
-    )
-    parser.add_argument(
-        "-a",
-        "--slurm-max-array-size",
-        dest="max_jobs_array",
-        type=int,
-        default=1000,
-        help="Slurm maximum job array size",
-    )
-
-    parser.add_argument(
+    optional.add_argument(
         "--db",
         dest="db",
         type=str,
+        metavar="DB",
         default="derep-genomes.db",
-        help="SQLite3 DB to store the results",
+        help=help_msg["db"],
     )
-    parser.add_argument(
-        "-s",
-        "--slurm_config",
+    optional.add_argument(
+        "--threads",
+        type=int,
+        metavar="INT",
+        dest="threads",
+        default=16,
+        help=help_msg["threads"],
+    )
+    optional.add_argument(
+        "--tmp",
+        type=str,
+        default="/tmp",
+        metavar="DIR",
+        dest="tmp_dir",
+        help=help_msg["tmp"],
+    )
+    optional.add_argument(
+        "--threshold",
+        metavar="FLOAT",
+        type=float,
+        default=2.0,
+        help=help_msg["threshold"],
+    )
+    slurm.add_argument(
+        "--slurm-config",
         dest="slurm_config",
+        default=argparse.SUPPRESS,
         required=False,
-        help="YAML configuration for slurm",
+        help=help_msg["slurm_config"],
         metavar="FILE",
         type=lambda x: is_valid_file(parser, x),
     )
-
-    parser.add_argument(
+    slurm.add_argument(
+        "--chunk-size",
+        metavar="INT",
+        dest="chunks",
+        type=int,
+        default=5,
+        help=help_msg["chunks"],
+    )
+    slurm.add_argument(
+        "--slurm-arr-size",
+        dest="max_jobs_array",
+        metavar="INT",
+        type=int,
+        default=1000,
+        help=help_msg["max_jobs_array"],
+    )
+    optional.add_argument(
         "--selected-taxa",
         dest="selected_taxa",
         required=False,
-        help="File with selected taxa. Taxa should have the following formar: d__;p__;c__;o__;f__;g__;s__",
         metavar="FILE",
+        default=argparse.SUPPRESS,
         type=lambda x: is_valid_file(parser, x),
+        help=help_msg["selected_taxa"],
     )
-    parser.add_argument(
+    optional.add_argument(
         "--copy",
         action="store_true",
         required="--out-dir" in " ".join(sys.argv),
+        help="Copy assembly files to the output folder",
     )
-    parser.add_argument(
-        "-d", "--debug", action="store_true", help="print debug messages to stderr"
-    )
-    parser.add_argument(
+    optional.add_argument(
         "--out-dir",
         dest="out_dir",
+        default=argparse.SUPPRESS,
         type=str,
         required="--copy" in " ".join(sys.argv),
-        help="Directory where dereplicated assemblies will be copied",
+        help=help_msg["out_dir"],
     )
-    parser.add_argument(
-        "-v",
+    optional.add_argument(
+        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
+    )
+    optional.add_argument(
         "--version",
         action="version",
         version="%(prog)s " + __version__,
-        help="print debug messages to stderr",
+        help=help_msg["version"],
     )
     args = parser.parse_args()
+    if not hasattr(args, "out_dir"):
+        args.out_dir = None
+    if not hasattr(args, "selected_taxa"):
+        args.selected_taxa = None
+    if not hasattr(args, "slurm_config"):
+        args.slurm_config = None
 
     return args
 
@@ -160,13 +200,16 @@ def load_classifications(tax_file):
     return classifications
 
 
+# from https://stackoverflow.com/a/62478211
+def absolute_file_paths(directory):
+    path = os.path.abspath(directory)
+    files = list(os.scandir(path))
+    return [entry.path for entry in files if entry.is_file()]
+
+
 def find_all_assemblies(in_dir):
     log.info("Finding assemblies in {}".format(in_dir))
-    all_assemblies = [
-        str(x)
-        for x in sorted(pathlib.Path(in_dir).absolute().glob("**/*"))
-        if x.is_file()
-    ]
+    all_assemblies = absolute_file_paths(in_dir)
     log.info("Found {:,} files in {}".format(len(all_assemblies), in_dir))
     return all_assemblies
 
@@ -183,15 +226,6 @@ def find_assemblies_for_accessions(accessions, all_assemblies):
             acc_to_assemblies[accession] = assembly_filename
         else:
             not_found.append(accession)
-
-    # logging.info("Found {}/{} assemblies".format(found_count, total_count))
-
-    # if not_found:
-    #     logging.info("Failed to find assemblies for the following accessions:")
-    #     wrapper = textwrap.TextWrapper(
-    #         initial_indent="    ", subsequent_indent="    ", width=100
-    #     )
-    #     logging.info(wrapper.fill(", ".join(not_found)))
 
     return acc_to_assemblies
 
@@ -248,6 +282,18 @@ def get_open_func(filename):
         return gzip.open
     else:  # plain text
         return open
+
+
+def get_assembly_n50(filename):
+    contig_lengths = sorted(get_contig_lengths(filename), reverse=True)
+    total_length = sum(contig_lengths)
+    target_length = total_length * 0.5
+    length_so_far = 0
+    for contig_length in contig_lengths:
+        length_so_far += contig_length
+        if length_so_far >= target_length:
+            return contig_length
+    return 0
 
 
 def get_assembly_length(filename):

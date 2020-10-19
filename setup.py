@@ -10,6 +10,7 @@ requirements = [
     "simple_slurm==0.1.5",
     "tqdm==4.50.0",
     "PyYAML==5.3.1",
+    "cdlib[C]>=0.1.9"
 ]
 
 setup(
