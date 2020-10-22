@@ -649,21 +649,22 @@ def main():
 
             l = [x[2] for x in dfs if None not in dfs]
             if all(v is None for v in l):
-                failed = None
+                failed = pd.DataFrame()
             else:
-                failed = [x[2] for x in dfs if None in dfs]
+                failed = pd.concat([x[2] for x in dfs if not None in dfs])
 
             l = [x[0] for x in dfs if None not in dfs]
             if all(v is None for v in l):
-                derep_assemblies = None
+                derep_assemblies = pd.DataFrame()
             else:
-                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
+                derep_assemblies = pd.concat([x[0] for x in dfs if not None in dfs])
 
             l = [x[1] for x in dfs if None not in dfs]
             if all(v is None for v in l):
-                results = None
+                results = pd.DataFrame()
             else:
-                results = pd.concat([x[1] for x in dfs if None not in dfs])
+                results = pd.concat([x[1] for x in dfs if not None in dfs])
+
             insert_to_db(
                 derep_assemblies=derep_assemblies,
                 results=results,

@@ -24,6 +24,7 @@ import yaml
 from multiprocessing import Pool
 import tqdm
 import io, sys
+from itertools import chain
 
 log = logging.getLogger("my_logger")
 
@@ -118,6 +119,7 @@ def process_fastANI_results(rfile):
 
     df = df.merge(df1.rename(columns={"assm": "source", "len": "source_len"}))
     df = df.merge(df1.rename(columns={"assm": "target", "len": "target_len"}))
+    os.remove(rfile)
     return df
 
 
@@ -280,9 +282,10 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
     slurm = Slurm(
         **yaml.load(open(slurm_config), Loader=yaml.FullLoader),
         output=(
-            "{}/gderep-{}_{}.out".format(
-                tmp_dir, Slurm.JOB_ARRAY_MASTER_ID, Slurm.JOB_ARRAY_ID
-            )
+            # "{}/gderep-{}_{}.out".format(
+            #     tmp_dir, Slurm.JOB_ARRAY_MASTER_ID, Slurm.JOB_ARRAY_ID
+            "/dev/null"
+            # )
         )
     )
 
@@ -336,13 +339,29 @@ def check_pw(pw, assms):
     return res
 
 
+# From https://gist.github.com/TariqAHassan/fc77c00efef4897241f49e61ddbede9e
+def fast_flatten(input_list):
+    return list(chain.from_iterable(input_list))
+
+
+def concat_df(frames):
+    COLUMN_NAMES = frames[0].columns
+    df_dict = dict.fromkeys(COLUMN_NAMES, [])
+    for col in COLUMN_NAMES:
+        extracted = (frame[col] for frame in frames)
+        # Flatten and save to df_dict
+        df_dict[col] = fast_flatten(extracted)
+    df = pd.DataFrame.from_dict(df_dict)[COLUMN_NAMES]
+    return df
+
+
 def reduce_slurm_jobs(ofiles, threads):
     if is_debug():
         dfs = list(map(process_fastANI_results, ofiles))
     else:
         p = Pool(threads)
         dfs = list(p.imap_unordered(process_fastANI_results, ofiles))
-    dfs = pd.concat(dfs)
+    dfs = concat_df(dfs)
     return dfs
 
 
