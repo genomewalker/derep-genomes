@@ -51,6 +51,7 @@ from derep_genomes.dbops import (
     check_if_done,
     retrieve_all_taxa_analyzed,
     retrieve_all_jobs_done,
+    retrieve_all_jobs_failed,
     delete_from_db,
     retrieve_all_genomes_derep,
 )
@@ -74,6 +75,8 @@ def process_one_taxon(taxon, parms):
     tmp_dir = parms["tmp_dir"]
     max_jobs_array = parms["max_jobs_array"]
 
+    failed_df = None
+
     log.debug("Dereplicating {}".format(taxon))
     classification = classification[classification["taxon"] == taxon]
     acc_to_assemblies = classification.loc[:, ["accession", "assembly"]]
@@ -88,7 +91,7 @@ def process_one_taxon(taxon, parms):
                 n_assemblies
             )
         )
-        derep_assemblies, results = dereplicate(
+        derep_assemblies, results, failed = dereplicate(
             all_assemblies=acc_to_assemblies,
             threads=threads,
             threshold=threshold,
@@ -97,64 +100,100 @@ def process_one_taxon(taxon, parms):
             tmp_dir=tmp_dir,
             max_jobs_array=max_jobs_array,
         )
+        if failed:
+            failed_df = acc_to_assemblies.copy()
+            failed_df.loc[:, "file"] = failed_df["assembly"].apply(os.path.basename)
+            failed_df.loc[:, "taxon"] = taxon
+            failed_df.loc[:, "reason"] = failed
+            failed_df = failed_df[["taxon", "accession", "file", "reason"]]
 
-        # Add taxa to taxa table
-        derep_assemblies.loc[:, "taxon"] = taxon
-        derep_assemblies.loc[:, "file"] = derep_assemblies["assembly"].apply(
-            os.path.basename
+        else:
+            # Add taxa to taxa table
+            derep_assemblies.loc[:, "taxon"] = taxon
+            derep_assemblies.loc[:, "file"] = derep_assemblies["assembly"].apply(
+                os.path.basename
+            )
+            results.loc[:, "taxon"] = taxon
+        return derep_assemblies, results, failed_df
+
+
+def insert_to_db(derep_assemblies, results, failed, con, threads, out_dir, copy):
+    if not derep_assemblies.empty:
+        query = check_existing(
+            df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
+            columns=["taxon"],
+            table="taxa",
+            con=con,
         )
-        results.loc[:, "taxon"] = taxon
-        return derep_assemblies, results
+        insert_pd_sql(query=query, table="taxa", con=con)
 
+        # Add genomes to genome table
+        query = check_existing(
+            df=derep_assemblies.loc[:, ["taxon", "accession"]],
+            columns=["taxon", "accession"],
+            table="genomes",
+            con=con,
+        )
+        genomes = insert_pd_sql(query=query, table="genomes", con=con)
 
-def insert_to_db(derep_assemblies, results, con, threads, out_dir, copy):
-    query = check_existing(
-        df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
-        columns=["taxon"],
-        table="taxa",
-        con=con,
-    )
-    insert_pd_sql(query=query, table="taxa", con=con)
+        # Add derep genomes to derep genome table
+        query = check_existing(
+            df=derep_assemblies[derep_assemblies["derep"] == 1]
+            .loc[:, ["accession", "representative"]]
+            .copy(),
+            columns=["accession", "representative"],
+            table="genomes_derep",
+            con=con,
+        )
+        genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
 
-    # Add genomes to genome table
-    query = check_existing(
-        df=derep_assemblies.loc[:, ["taxon", "accession"]],
-        columns=["taxon", "accession"],
-        table="genomes",
-        con=con,
-    )
-    genomes = insert_pd_sql(query=query, table="genomes", con=con)
+    if not results.empty:
+        # Add results to results table
+        query = check_existing(
+            results.loc[
+                :, ["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"]
+            ],
+            columns=["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"],
+            table="results",
+            con=con,
+        )
+        results_db = insert_pd_sql(query=query, table="results", con=con)
 
-    # Add derep genomes to derep genome table
-    query = check_existing(
-        df=derep_assemblies[derep_assemblies["derep"] == 1]
-        .loc[:, ["accession", "representative"]]
-        .copy(),
-        columns=["accession", "representative"],
-        table="genomes_derep",
-        con=con,
-    )
-    genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
+    if not derep_assemblies.empty and not results.empty:
+        # Add jobs done to table
+        query = check_existing(
+            derep_assemblies.loc[:, ["taxon", "accession", "file"]],
+            columns=["taxon", "accession", "file"],
+            table="jobs_done",
+            con=con,
+        )
+        jobs_done_db = insert_pd_sql(query=query, table="jobs_done", con=con)
 
-    # Add results to results table
-    query = check_existing(
-        results.loc[
-            :, ["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"]
-        ],
-        columns=["taxon", "weight", "communities", "n_genomes", "n_genomes_derep"],
-        table="results",
-        con=con,
-    )
-    results_db = insert_pd_sql(query=query, table="results", con=con)
+    # Add failed jobs to table
+    if not failed.empty:
+        query = check_existing(
+            failed.loc[:, ["taxon", "accession", "file", "reason"]],
+            columns=["taxon", "accession", "file", "reason"],
+            table="jobs_failed",
+            con=con,
+        )
+        jobs_failed = insert_pd_sql(query=query, table="jobs_failed", con=con)
 
-    # Add jobs done to table
-    query = check_existing(
-        derep_assemblies.loc[:, ["taxon", "accession", "file"]],
-        columns=["taxon", "accession", "file"],
-        table="jobs_done",
-        con=con,
-    )
-    jobs_done_db = insert_pd_sql(query=query, table="jobs_done", con=con)
+        query = check_existing(
+            df=failed.loc[:, ["taxon"]].drop_duplicates(),
+            columns=["taxon"],
+            table="taxa",
+            con=con,
+        )
+        insert_pd_sql(query=query, table="taxa", con=con)
+
+        query = check_existing(
+            failed.loc[:, ["taxon", "accession", "file"]],
+            columns=["taxon", "accession", "file"],
+            table="jobs_done",
+            con=con,
+        )
+        jobs_failed = insert_pd_sql(query=query, table="jobs_done", con=con)
 
     try:
         con.commit()
@@ -527,7 +566,7 @@ def main():
             )
 
             if is_debug():
-                files = list(map(partial(process_one_taxon, parms=parms), taxons))
+                dfs = list(map(partial(process_one_taxon, parms=parms), taxons))
             else:
                 p = Pool(nworkers)
                 dfs = list(
@@ -541,11 +580,28 @@ def main():
                     )
                 )
 
-            derep_assemblies = pd.concat([x[0] for x in dfs])
-            results = pd.concat([x[1] for x in dfs])
+            l = [x[2] for x in dfs if None not in dfs]
+            if all(v is None for v in l):
+                failed = pd.DataFrame()
+            else:
+                failed = pd.concat([x[2] for x in dfs if not None in dfs])
+
+            l = [x[0] for x in dfs if None not in dfs]
+            if all(v is None for v in l):
+                derep_assemblies = pd.DataFrame()
+            else:
+                derep_assemblies = pd.concat([x[0] for x in dfs if not None in dfs])
+
+            l = [x[1] for x in dfs if None not in dfs]
+            if all(v is None for v in l):
+                results = pd.DataFrame()
+            else:
+                results = pd.concat([x[1] for x in dfs if not None in dfs])
+
             insert_to_db(
                 derep_assemblies=derep_assemblies,
                 results=results,
+                failed=failed,
                 con=con,
                 threads=args.threads,
                 out_dir=args.out_dir,
@@ -590,35 +646,61 @@ def main():
                         ncols=80,
                     )
                 )
-            derep_assemblies = pd.concat([x[0] for x in dfs])
-            results = pd.concat([x[1] for x in dfs])
+
+            l = [x[2] for x in dfs if None not in dfs]
+            if all(v is None for v in l):
+                failed = None
+            else:
+                failed = [x[2] for x in dfs if None in dfs]
+
+            l = [x[0] for x in dfs if None not in dfs]
+            if all(v is None for v in l):
+                derep_assemblies = None
+            else:
+                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
+
+            l = [x[1] for x in dfs if None not in dfs]
+            if all(v is None for v in l):
+                results = None
+            else:
+                results = pd.concat([x[1] for x in dfs if None not in dfs])
             insert_to_db(
                 derep_assemblies=derep_assemblies,
                 results=results,
+                failed=failed,
                 con=con,
                 threads=args.threads,
                 out_dir=args.out_dir,
                 copy=args.copy,
             )
-
         jobs_done = retrieve_all_jobs_done(con)
+        jobs_failed = retrieve_all_jobs_failed(con)
         genomes_derep = retrieve_all_genomes_derep(con)
-        jobs_done = jobs_done.merge(genomes_derep)
-        fname = timestr + "-derep-genomes_results.tsv"
-        logging.info("Saving results to {}".format(fname))
-        jobs_done.loc[:, "src"] = jobs_done["file"].apply(
-            lambda x: os.path.join(in_dir, x)
-        )
-        if not args.copy:
-            jobs_done.loc[:, "dst"] = ""
-        else:
-            jobs_done.loc[:, "dst"] = jobs_done["file"].apply(
-                lambda x: os.path.join(out_dir, x)
+        logging.info(
+            "Jobs failed: {} / Jobs done: {}".format(
+                jobs_failed.shape[0], jobs_done.shape[0]
             )
-        jobs_done["representative"] = jobs_done["representative"].astype(bool)
-        jobs_done[["taxon", "accession", "representative", "src", "dst"]].to_csv(
-            fname, index=False, sep="\t"
         )
+        if not jobs_done.empty and not genomes_derep.empty:
+            jobs_done = retrieve_all_jobs_done(con)
+            genomes_derep = retrieve_all_genomes_derep(con)
+
+            jobs_done = jobs_done.merge(genomes_derep)
+            fname = timestr + "-derep-genomes_results.tsv"
+            logging.info("Saving results to {}".format(fname))
+            jobs_done.loc[:, "src"] = jobs_done["file"].apply(
+                lambda x: os.path.join(in_dir, x)
+            )
+            if not args.copy:
+                jobs_done.loc[:, "dst"] = ""
+            else:
+                jobs_done.loc[:, "dst"] = jobs_done["file"].apply(
+                    lambda x: os.path.join(out_dir, x)
+                )
+            jobs_done["representative"] = jobs_done["representative"].astype(bool)
+            jobs_done[["taxon", "accession", "representative", "src", "dst"]].to_csv(
+                fname, index=False, sep="\t"
+            )
     else:
         logging.info("Didn't find any new assemblies to process")
     con.close()

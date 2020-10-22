@@ -1,6 +1,6 @@
 import math
 import tempfile
-from statistics import mean
+from statistics import mean, median
 import leidenalg
 import networkx as nx
 import igraph as ig
@@ -74,7 +74,7 @@ def __from_nx_to_igraph(g, directed=None):
     return gi
 
 
-def pairwise_fastANI(assemblies, threads, temp_dir):
+def pairwise_fastANI(assemblies, threads, temp_dir, frag_len):
     glist = temp_dir + "/assm_list.txt"
     rfile = temp_dir + "/fastANI.txt"
     with open(glist, "w") as outfile:
@@ -87,6 +87,8 @@ def pairwise_fastANI(assemblies, threads, temp_dir):
         glist,
         "--rl",
         glist,
+        "--fragLen",
+        str(int(frag_len)),
         "-t",
         str(threads),
         "-o",
@@ -102,7 +104,7 @@ def process_fastANI_results(rfile):
         sep="\t",
         names=["source", "target", "ANI", "frags", "total_frags"],
     )
-
+    log.debug("Loaded {} comparinsons from ANI file".format(df.shape[0]))
     df["aln_frac"] = df["frags"] / df["total_frags"]
     df["weight"] = df["ANI"].div(100)
     df["weight"] = df["weight"] * df["aln_frac"]
@@ -296,10 +298,21 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
     log.debug(
         "Mapping {} jobs to SLURM in {} batch(es)".format(len(cmds), len(job_ranges))
     )
+
+    df = pd.read_csv(rfile, header=None)
+
     for r in job_ranges:
-        slurm.set_array(r)
+        rfile_tmp = os.path.join(odir, "fastANI_out_jobs-tmp.txt")
+        #
+        skrows = min(r) - 1
+        nrows = max(r)
+        df1 = df.iloc[(min(r) - 1) : (max(r))]
+        df1.to_csv(rfile_tmp, index=False, sep="\t", header=False)
+        new_r = range(1, df1.shape[0] + 1)
+
+        slurm.set_array(new_r)
         slurm.add_arguments(wait="")
-        bjob = "$(awk -vJ=" + "$SLURM_ARRAY_TASK_ID " + "'NR==J' " + rfile + " )"
+        bjob = "$(awk -vJ=" + "$SLURM_ARRAY_TASK_ID " + "'NR==J' " + rfile_tmp + " )"
         text_trap = io.StringIO()
         sys.stdout = text_trap
         job_id = slurm.sbatch(bjob)
@@ -307,6 +320,20 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
         job_ids.append(job_id)
 
     return job_ids
+
+
+def check_pw(pw, assms):
+    res = {}
+    if pw.empty:
+        res = {"missing": [], "failed": True}
+        return res
+
+    #    ids = list(set(pw["source"].tolist() + pw["target"].tolist()))
+    ids = list(set(pw.source).union(set(pw.target)))
+    # Find if we are missing any assmebly (too divergent)
+    diffs = list(set(assms) - set(ids))
+    res = {"missing": diffs, "failed": False}
+    return res
 
 
 def reduce_slurm_jobs(ofiles, threads):
@@ -343,7 +370,7 @@ def dereplicate(
     derep_assemblies = []
     n_assemblies = all_assemblies.shape[0]
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
-
+        failed = None
         if n_assemblies < 10 or slurm_config is None:
             if (n_assemblies * n_assemblies) < threads:
                 threads = n_assemblies * n_assemblies
@@ -352,13 +379,38 @@ def dereplicate(
                     n_assemblies, threads
                 )
             )
+            assm_lens = (
+                all_assemblies["assembly"]
+                .map(lambda x: get_assembly_length(x))
+                .tolist()
+            )
+            x = min(assm_lens)
+            if x < 3000:
+                frag_len = math.floor(x / 500.0) * 500.0
+            else:
+                frag_len = 3000
+
+            log.debug(
+                "Minimum assembly length of {}. fastANI fragment length used: {}".format(
+                    x, frag_len
+                )
+            )
+
+            if frag_len == 0:
+                log.debug("Failed. Reason: Assemblies too short")
+                failed = "Assemblies too short"
+                return None, None, failed
+
             ani_results = pairwise_fastANI(
                 assemblies=all_assemblies["assembly"].tolist(),
                 threads=threads,
                 temp_dir=temp_dir,
+                frag_len=frag_len,
             )
+
             log.debug("Processing ANI results")
             pairwise_distances = process_fastANI_results(ani_results)
+            log.debug("Obtained {:,} comparisons".format(pairwise_distances.shape[0]))
         else:
             n = chunks
             chunks = split_fixed_size(all_assemblies["assembly"].tolist(), n)
@@ -381,6 +433,23 @@ def dereplicate(
             )
             log.debug("Reducing SLURM jobs and processing ANI results")
             pairwise_distances = reduce_slurm_jobs(ofiles, threads)
+
+        pw = check_pw(pw=pairwise_distances, assms=all_assemblies["assembly"].tolist())
+
+        if pw["failed"]:
+            log.debug("Failed. Reason: Assemblies too divergent")
+            failed = "Assemblies too divergent"
+            return None, None, failed
+
+        missing = pw["missing"]
+
+        if len(missing) > 0:
+            log.debug(
+                "Missing {:,} assemblies in the fastANI comparison, Assemblies too divergent".format(
+                    len(missing)
+                )
+            )
+
         # Convert pw dist to graph
         log.debug("Generating ANI graph")
         M = nx.from_pandas_edgelist(
@@ -394,10 +463,32 @@ def dereplicate(
                     d.get("weight", 1) for d in M.get_edge_data(u, v).values()
                 )
                 G.add_edge(u, v, weight=weight)
-        G.remove_edges_from(nx.selfloop_edges(G))
+
+        G.remove_edges_from(list(nx.selfloop_edges(G)))
+
+        if G.number_of_edges() == 0:
+            log.debug("Only self loops found")
+            all_assemblies.loc[:, "representative"] = 1
+            all_assemblies.loc[:, "derep"] = 1
+
+            results = pd.DataFrame(
+                [
+                    (
+                        0,
+                        G.number_of_nodes(),
+                        G.number_of_nodes(),
+                        G.number_of_edges(),
+                    )
+                ],
+                columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
+            )
+            return all_assemblies, results, failed
+
         weights = []
+
         for u, v, d in G.edges(data=True):
             weights.append(d["weight"])
+
         if len(weights) > 2:
             weights = sorted(set(weights))
             log.debug("Filtering ANI graph")
@@ -406,7 +497,7 @@ def dereplicate(
             )
 
         else:
-            log.debug("Skipping graph filltering, number of edges <=2")
+            log.debug("Skipping graph filtering, number of edges <=2")
             G_filt = G
             w_filt = None
 
@@ -415,10 +506,7 @@ def dereplicate(
         )
         # partition = community_louvain.best_partition(G_filt, resolution=1.0)
 
-        for u, v, d in G_filt.edges(data=True):
-            weights.append(d["weight"])
-
-        g = __from_nx_to_igraph(G_filt)
+        g = __from_nx_to_igraph(G_filt, directed=False)
 
         part = leidenalg.find_partition(
             g, leidenalg.ModularityVertexPartition, weights="weight"
@@ -441,6 +529,7 @@ def dereplicate(
         )
 
         reps, subgraphs = get_reps(graph=G_filt, partition=partition)
+
         derep_assemblies = []
         for i in range(len(reps)):
             candidates = refine_candidates(
@@ -454,7 +543,9 @@ def dereplicate(
                     derep_assemblies.append(candidate)
             else:
                 derep_assemblies = candidates
-    derep_assemblies = list(set(derep_assemblies))
+    derep_assemblies = list(set(derep_assemblies + missing))
+    reps = reps + missing
+
     log.debug(
         "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
     )
@@ -481,28 +572,52 @@ def dereplicate(
     all_assemblies.loc[:, "derep"] = 0
     all_assemblies.loc[all_assemblies["assembly"].isin(derep_assemblies), "derep"] = 1
 
-    return all_assemblies, results
+    return all_assemblies, results, failed
 
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):
     results = []
-    for reachable_node in nx.dfs_postorder_nodes(subgraph, source=rep):
+
+    if subgraph.number_of_edges() == 0:
+        return [rep]
+    for reachable_node in nx.all_neighbors(subgraph, rep):
         if reachable_node != rep:
-            df = pw[
-                ((pw["source"] == rep) & (pw["target"] == reachable_node))
-                | ((pw["target"] == rep) & (pw["source"] == reachable_node))
-            ]
-            source_len = df[df["source"] == rep].iloc[0]["source_len"]
-            target_len = df[df["source"] == rep].iloc[0]["target_len"]
+            idx = pw["target"] == rep
+            pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
+                idx, ["target", "source", "target_len", "source_len"]
+            ].values
+
+            df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
+
+            # Switch column order
+            # idx = df["target"] == rep
+            # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
+            #     idx, ["target", "source", "target_len", "source_len"]
+            # ].values
+
+            source_len = mean(df.source_len.values)
+            target_len = mean(df.target_len.values)
             len_diff = abs(source_len - target_len)
 
-            source_aln = df[df["source"] == rep].iloc[0]["aln_frac"]
-            target_aln = df[df["source"] != rep].iloc[0]["aln_frac"]
-            aln_frac = mean([source_aln, target_aln])
+            aln_frac = mean(df.aln_frac.values)
+            weight = mean(df.weight.values)
+            # source_len = df[df["source"] == rep].iloc[0]["source_len"]
+            # target_len = df[df["source"] == rep].iloc[0]["target_len"]
+            # len_diff = abs(source_len - target_len)
 
-            source_w = df[df["source"] == rep].iloc[0]["weight"]
-            target_w = df[df["source"] != rep].iloc[0]["weight"]
-            weight = mean([source_w, target_w])
+            # source_aln = df[df["source"] == rep].iloc[0]["aln_frac"]
+            # if df.shape[0] > 1:
+            #     target_aln = df[df["source"] != rep].iloc[0]["aln_frac"]
+            #     aln_frac = mean([source_aln, target_aln])
+            # else:
+            #     aln_frac = source_aln
+
+            # source_w = df[df["source"] == rep].iloc[0]["weight"]
+            # if df.shape[0] > 1:
+            #     target_w = df[df["source"] != rep].iloc[0]["weight"]
+            #     weight = mean([source_w, target_w])
+            # else:
+            #     weight = source_w
 
             results.append(
                 {

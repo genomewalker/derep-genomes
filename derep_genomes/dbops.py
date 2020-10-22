@@ -6,13 +6,7 @@ import os
 from pathlib import Path
 import pandas as pd
 
-tables = [
-    "taxa",
-    "genomes",
-    "genomes_derep",
-    "results",
-    "jobs_done",
-]
+tables = ["taxa", "genomes", "genomes_derep", "results", "jobs_done", "jobs_failed"]
 
 log = logging.getLogger("my_logger")
 
@@ -70,19 +64,22 @@ def create_db_tables(con):
     )
     jobs_done_table_idx = "CREATE INDEX idx_jobs_done_taxon ON jobs_done (taxon);"
 
+    failed_table = "CREATE TABLE jobs_failed(taxon TEXT, accession TEXT PRIMARY KEY, file TEXT, reason TEXT)"
+    failed_table_idx = "CREATE INDEX idx_jobs_failed_taxon ON jobs_failed (taxon);"
+
     # Create tables
     con.execute(tax_table)
     con.execute(genomes_table)
     con.execute(genomes_derep_table)
     con.execute(results_table)
     con.execute(jobs_done_table)
-
+    con.execute(failed_table)
     # Create indices
     con.execute(tax_table_idx)
     con.execute(genomes_table_idx)
     con.execute(genomes_derep_table_idx)
     con.execute(results_table_idx)
-    con.execute(jobs_done_table_idx)
+    con.execute(failed_table_idx)
 
     try:
         con.commit()
@@ -225,6 +222,16 @@ def retrieve_jobs_done(con, taxon):
 
 def retrieve_all_jobs_done(con):
     query = "SELECT * from jobs_done"
+    jobs = pd.read_sql(query, con)
+
+    if not jobs.empty:
+        return jobs
+    else:
+        return pd.DataFrame()
+
+
+def retrieve_all_jobs_failed(con):
+    query = "SELECT * from jobs_failed"
     jobs = pd.read_sql(query, con)
 
     if not jobs.empty:
