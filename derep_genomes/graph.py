@@ -105,7 +105,7 @@ def process_fastANI_results(rfile):
         sep="\t",
         names=["source", "target", "ANI", "frags", "total_frags"],
     )
-    log.debug("Loaded {} comparinsons from ANI file".format(df.shape[0]))
+    # log.debug("Loaded {} comparinsons from ANI file".format(df.shape[0]))
     df["aln_frac"] = df["frags"] / df["total_frags"]
     df["weight"] = df["ANI"].div(100)
     df["weight"] = df["weight"] * df["aln_frac"]
@@ -229,7 +229,7 @@ def get_reps(graph, partition):
         nodes = [k for k in partition if partition[k] == i]
         subgraph = graph.subgraph(nodes)
         subgraphs.append(subgraph)
-        cents = nx.eigenvector_centrality(subgraph, weight="weight")
+        cents = nx.eigenvector_centrality(subgraph, weight="weight", max_iter=1000)
         rep = max(cents.keys(), key=(lambda k: cents[k]))
         reps.append(rep)
     return reps, subgraphs
@@ -248,7 +248,7 @@ def save_chunks_to_disk(chunks, temp_dir):
     return file_chunks, wdir
 
 
-def create_slurm_commands(files, wdir):
+def create_slurm_commands(files, wdir, frag_len):
     file_list = list(product(files.keys(), files.keys()))
     odir = os.path.join(wdir, "fastANI_out")
     Path(odir).mkdir(parents=True, exist_ok=True)
@@ -257,7 +257,17 @@ def create_slurm_commands(files, wdir):
     for file in file_list:
         ofile = os.path.join(odir, "fastANI_out_" + str(file[0]) + "_" + str(file[1]))
         cmd = " ".join(
-            ["fastANI", "--ql", files[file[0]], "--rl", files[file[1]], "-o", ofile]
+            [
+                "fastANI",
+                "--ql",
+                files[file[0]],
+                "--rl",
+                files[file[1]],
+                "-o",
+                ofile,
+                "--fragLen",
+                str(int(frag_len)),
+            ]
         )
         cmds.append(cmd)
         ofiles.append(ofile)
@@ -357,10 +367,14 @@ def concat_df(frames):
 
 def reduce_slurm_jobs(ofiles, threads):
     if is_debug():
-        dfs = list(map(process_fastANI_results, ofiles))
+        dfs = list(
+            map(process_fastANI_results, ofiles),
+        )
     else:
         p = Pool(threads)
-        dfs = list(p.imap_unordered(process_fastANI_results, ofiles))
+        dfs = list(
+            p.imap_unordered(process_fastANI_results, ofiles),
+        )
     dfs = concat_df(dfs)
     return dfs
 
@@ -368,6 +382,28 @@ def reduce_slurm_jobs(ofiles, threads):
 def is_unique(s):
     a = s.to_numpy()  # s.values (pandas<0.24)
     return (a[0] == a).all()
+
+
+def estimate_frag_len(all_assemblies):
+    assm_lens = (
+        all_assemblies["assembly"].map(lambda x: get_assembly_length(x)).tolist()
+    )
+    x = min(assm_lens)
+    if x < 3000:
+        frag_len = math.floor(x / 500.0) * 500.0
+    else:
+        frag_len = 3000
+
+    log.debug(
+        "Minimum assembly length of {}. fastANI fragment length used: {}".format(
+            x, frag_len
+        )
+    )
+
+    if frag_len == 0:
+        return None
+
+    return frag_len
 
 
 def dereplicate(
@@ -398,24 +434,10 @@ def dereplicate(
                     n_assemblies, threads
                 )
             )
-            assm_lens = (
-                all_assemblies["assembly"]
-                .map(lambda x: get_assembly_length(x))
-                .tolist()
-            )
-            x = min(assm_lens)
-            if x < 3000:
-                frag_len = math.floor(x / 500.0) * 500.0
-            else:
-                frag_len = 3000
 
-            log.debug(
-                "Minimum assembly length of {}. fastANI fragment length used: {}".format(
-                    x, frag_len
-                )
-            )
+            frag_len = estimate_frag_len(all_assemblies)
 
-            if frag_len == 0:
+            if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")
                 failed = "Assemblies too short"
                 return None, None, failed
@@ -433,19 +455,24 @@ def dereplicate(
         else:
             n = chunks
             chunks = split_fixed_size(all_assemblies["assembly"].tolist(), n)
-            # chunks = [
-            #     all_assemblies[i * n : (i + 1) * n]
-            #     for i in range((len(all_assemblies) + n - 1) // n)
-            # ]
+
             log.debug(
                 "Found {} assemblies, creating {} chunks with {} genomes".format(
                     len(all_assemblies), len(chunks), n
                 )
             )
+
+            frag_len = estimate_frag_len(all_assemblies)
+
+            if frag_len is None:
+                log.debug("Failed. Reason: Assemblies too short")
+                failed = "Assemblies too short"
+                return None, None, failed
+
             # save chunks to disk
             files, wdir = save_chunks_to_disk(chunks, temp_dir)
             # Create fastANI commands
-            cmds, ofiles, odir = create_slurm_commands(files, wdir)
+            cmds, ofiles, odir = create_slurm_commands(files, wdir, frag_len)
             # Run slurm array job
             slurm_jobs = map_slurm_jobs(
                 cmds, ofiles, slurm_config, odir, max_jobs_array, temp_dir
@@ -469,6 +496,9 @@ def dereplicate(
                 )
             )
 
+        pairwise_distances[
+            ["source", "target", "ANI", "source_len", "target_len"]
+        ].to_csv("test.tsv", index=False, sep="\t")
         # Convert pw dist to graph
         log.debug("Generating ANI graph")
         M = nx.from_pandas_edgelist(
@@ -482,8 +512,11 @@ def dereplicate(
                     d.get("weight", 1) for d in M.get_edge_data(u, v).values()
                 )
                 G.add_edge(u, v, weight=weight)
-
+        # Remove self loops
         G.remove_edges_from(list(nx.selfloop_edges(G)))
+        # Identify isolated nodes
+        isolated = list(nx.isolates(G))
+        G.remove_nodes_from(isolated)
 
         if G.number_of_edges() == 0:
             log.debug("Only self loops found")
@@ -503,27 +536,52 @@ def dereplicate(
             )
             return all_assemblies, results, failed
 
-        weights = []
+        # TODO: streamline this
 
-        for u, v, d in G.edges(data=True):
-            weights.append(d["weight"])
+        graphs_filt = []
+        w_filts = []
+        if G.number_of_edges() > 2:
+            # TODO: Check how many components do we have
+            n_comp = nx.number_connected_components(G)
+            if n_comp > 1:
+                log.debug("Graph with {} component(s".format(n_comp))
+                for component in sorted(
+                    nx.connected_components(G), key=len, reverse=True
+                ):
+                    component = G.subgraph(component).copy()
+                    weights = []
 
-        if len(weights) > 2:
-            weights = sorted(set(weights))
-            log.debug("Filtering ANI graph")
-            G_filt, w_filt = binary_search_filter(
-                g=G, low=0, high=len(weights) - 1, weights=weights
-            )
+                    for u, v, d in component.edges(data=True):
+                        weights.append(d["weight"])
 
+                    weights = sorted(set(weights))
+                    log.debug("Filtering ANI graph")
+                    G_filt, w_filt = binary_search_filter(
+                        g=component, low=0, high=len(weights) - 1, weights=weights
+                    )
+                    graphs_filt.append(G_filt)
+                    w_filts.append(w_filt)
+            else:
+                weights = []
+                for u, v, d in G.edges(data=True):
+                    weights.append(d["weight"])
+                weights = sorted(set(weights))
+                log.debug("Filtering ANI graph")
+                G_filt, w_filt = binary_search_filter(
+                    g=G, low=0, high=len(weights) - 1, weights=weights
+                )
+                graphs_filt.append(G_filt)
+                w_filts.append(w_filt)
         else:
             log.debug("Skipping graph filtering, number of edges <=2")
-            G_filt = G
-            w_filt = None
-
+            graphs_filt = [G]
+            w_filts = [None]
         log.debug(
             "Finding genome representatives using Louvain + eigenvector centrality"
         )
         # partition = community_louvain.best_partition(G_filt, resolution=1.0)
+        G_filt = nx.compose_all(graphs_filt)
+        w_filt = ",".join(map(lambda x: str(x), w_filts))
 
         g = __from_nx_to_igraph(G_filt, directed=False)
 
@@ -548,7 +606,6 @@ def dereplicate(
         )
 
         reps, subgraphs = get_reps(graph=G_filt, partition=partition)
-
         derep_assemblies = []
         for i in range(len(reps)):
             candidates = refine_candidates(
@@ -562,8 +619,8 @@ def dereplicate(
                     derep_assemblies.append(candidate)
             else:
                 derep_assemblies = candidates
-    derep_assemblies = list(set(derep_assemblies + missing))
-    reps = reps + missing
+    derep_assemblies = list(set(derep_assemblies + missing + isolated))
+    reps = reps + missing + isolated
 
     log.debug(
         "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
