@@ -130,7 +130,7 @@ def get_arguments(argv=None):
         metavar="INT",
         dest="chunks",
         type=int,
-        default=5,
+        default=10,
         help=help_msg["chunks"],
     )
     slurm.add_argument(

@@ -619,7 +619,7 @@ def dereplicate(
                     derep_assemblies.append(candidate)
             else:
                 derep_assemblies = candidates
-    derep_assemblies = list(set(derep_assemblies + missing + isolated))
+    derep_assemblies = list(set(derep_assemblies + reps + missing + isolated))
     reps = reps + missing + isolated
 
     log.debug(
@@ -636,6 +636,14 @@ def dereplicate(
         ],
         columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
     )
+
+    if len(reps) > len(derep_assemblies):
+        log.debug(
+            "Less representatives {} than dereplicated assemblies {} !!!".format(
+                len(reps), len(derep_assemblies)
+            )
+        )
+        exit(0)
     rep_keys = all_assemblies[all_assemblies["assembly"].isin(reps)][
         "accession"
     ].tolist()
