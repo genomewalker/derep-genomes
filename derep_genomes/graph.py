@@ -263,10 +263,10 @@ def create_slurm_commands(files, wdir, frag_len):
                 files[file[0]],
                 "--rl",
                 files[file[1]],
-                "-o",
-                ofile,
                 "--fragLen",
                 str(int(frag_len)),
+                "-o",
+                ofile,
             ]
         )
         cmds.append(cmd)
@@ -283,7 +283,7 @@ def split_fixed_size(lst, n):
     return splits
 
 
-def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
+def map_slurm_jobs(cmds, slurm_config, odir, max_jobs_array, tmp_dir, threads):
     rfile = os.path.join(odir, "fastANI_out_jobs.txt")
     with open(rfile, "w") as outfile:
         for cmd in cmds:
@@ -313,13 +313,16 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
     )
 
     df = pd.read_csv(rfile, header=None)
-
+    pw = []
     for r in job_ranges:
         rfile_tmp = os.path.join(odir, "fastANI_out_jobs-tmp.txt")
-        #
         skrows = min(r) - 1
         nrows = max(r)
         df1 = df.iloc[(min(r) - 1) : (max(r))]
+        df1.columns = ["cmd"]
+
+        ofiles = df1["cmd"].str.rsplit(" ", 1).str[-1].values
+
         df1.to_csv(rfile_tmp, index=False, sep="\t", header=False)
         new_r = range(1, df1.shape[0] + 1)
 
@@ -331,8 +334,9 @@ def map_slurm_jobs(cmds, ofiles, slurm_config, odir, max_jobs_array, tmp_dir):
         job_id = slurm.sbatch(bjob)
         sys.stdout = sys.__stdout__
         job_ids.append(job_id)
-
-    return job_ids
+        pairwise_distances = reduce_slurm_jobs(ofiles, threads)
+        pw.append(pairwise_distances)
+    return pw
 
 
 def check_pw(pw, assms):
@@ -474,11 +478,12 @@ def dereplicate(
             # Create fastANI commands
             cmds, ofiles, odir = create_slurm_commands(files, wdir, frag_len)
             # Run slurm array job
-            slurm_jobs = map_slurm_jobs(
-                cmds, ofiles, slurm_config, odir, max_jobs_array, temp_dir
+            pairwise_distances = map_slurm_jobs(
+                cmds, slurm_config, odir, max_jobs_array, temp_dir, threads
             )
+            pairwise_distances = concat_df(pairwise_distances)
             log.debug("Reducing SLURM jobs and processing ANI results")
-            pairwise_distances = reduce_slurm_jobs(ofiles, threads)
+            # pairwise_distances = reduce_slurm_jobs(ofiles, threads)
 
         pw = check_pw(pw=pairwise_distances, assms=all_assemblies["assembly"].tolist())
 
