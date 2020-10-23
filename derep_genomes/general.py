@@ -41,6 +41,7 @@ def is_valid_file(parser, arg):
 
 help_msg = {
     "in_dir": "Directory containing all assemblies",
+    "in_file": "Fasta file containing all index assemblies",
     "tax_file": "TSV file with the taxonomic information",
     "db": "SQLite3 DB to store the results",
     "tmp": "Temporary directory",
@@ -54,134 +55,6 @@ help_msg = {
     "debug": "Print debug messages",
     "version": "Print program version",
 }
-
-
-def get_arguments(argv=None):
-
-    parser = argparse.ArgumentParser(
-        description="Cluster assemblies in each taxon",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
-    optional = parser._action_groups.pop()  # Edited this line
-    required = parser.add_argument_group("required arguments")
-    parser._action_groups.append(optional)  # added this line
-    slurm = parser.add_argument_group("SLURM arguments")
-
-    required.add_argument(
-        "--in-dir",
-        dest="in_dir",
-        default=argparse.SUPPRESS,
-        required=True,
-        metavar="DIR",
-        type=lambda x: is_valid_file(parser, x),
-        help=help_msg["in_dir"],
-    )
-    required.add_argument(
-        "--taxa",
-        required=True,
-        metavar="FILE",
-        default=argparse.SUPPRESS,
-        type=lambda x: is_valid_file(parser, x),
-        dest="tax_file",
-        help=help_msg["tax_file"],
-    )
-    optional.add_argument(
-        "--db",
-        dest="db",
-        type=str,
-        metavar="DB",
-        default="derep-genomes.db",
-        help=help_msg["db"],
-    )
-    optional.add_argument(
-        "--threads",
-        type=int,
-        metavar="INT",
-        dest="threads",
-        default=16,
-        help=help_msg["threads"],
-    )
-    optional.add_argument(
-        "--tmp",
-        type=str,
-        default="/tmp",
-        metavar="DIR",
-        dest="tmp_dir",
-        help=help_msg["tmp"],
-    )
-    optional.add_argument(
-        "--threshold",
-        metavar="FLOAT",
-        type=float,
-        default=2.0,
-        help=help_msg["threshold"],
-    )
-    slurm.add_argument(
-        "--slurm-config",
-        dest="slurm_config",
-        default=argparse.SUPPRESS,
-        required=False,
-        help=help_msg["slurm_config"],
-        metavar="FILE",
-        type=lambda x: is_valid_file(parser, x),
-    )
-    slurm.add_argument(
-        "--chunk-size",
-        metavar="INT",
-        dest="chunks",
-        type=int,
-        default=10,
-        help=help_msg["chunks"],
-    )
-    slurm.add_argument(
-        "--slurm-arr-size",
-        dest="max_jobs_array",
-        metavar="INT",
-        type=int,
-        default=1000,
-        help=help_msg["max_jobs_array"],
-    )
-    optional.add_argument(
-        "--selected-taxa",
-        dest="selected_taxa",
-        required=False,
-        metavar="FILE",
-        default=argparse.SUPPRESS,
-        type=lambda x: is_valid_file(parser, x),
-        help=help_msg["selected_taxa"],
-    )
-    optional.add_argument(
-        "--copy",
-        action="store_true",
-        required="--out-dir" in " ".join(sys.argv),
-        help="Copy assembly files to the output folder",
-    )
-    optional.add_argument(
-        "--out-dir",
-        dest="out_dir",
-        default=argparse.SUPPRESS,
-        type=str,
-        required="--copy" in " ".join(sys.argv),
-        help=help_msg["out_dir"],
-    )
-    optional.add_argument(
-        "--debug", dest="debug", action="store_true", help=help_msg["debug"]
-    )
-    optional.add_argument(
-        "--version",
-        action="version",
-        version="%(prog)s " + __version__,
-        help=help_msg["version"],
-    )
-    args = parser.parse_args()
-    if not hasattr(args, "out_dir"):
-        args.out_dir = None
-    if not hasattr(args, "selected_taxa"):
-        args.selected_taxa = None
-    if not hasattr(args, "slurm_config"):
-        args.slurm_config = None
-
-    return args
 
 
 def create_jobs_db(db, path):
@@ -228,6 +101,21 @@ def find_assemblies_for_accessions(accessions, all_assemblies):
             not_found.append(accession)
 
     return acc_to_assemblies
+
+
+def shorten_accession(accession):
+    if accession.startswith("GCF_") or accession.startswith("GCA_"):
+        accession = accession.split(".")[0]
+        assert len(accession) == 13
+    return accession
+
+
+def get_accession(assembly):
+    res = {}
+    accession = os.path.basename(assembly)
+    accession = shorten_accession(accession)
+    res = {"accession_nover": accession, "assembly": assembly}
+    return res
 
 
 def get_assembly_filename(accession, all_assemblies):
