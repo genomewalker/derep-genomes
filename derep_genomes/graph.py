@@ -25,6 +25,7 @@ from multiprocessing import Pool
 import tqdm
 import io, sys
 from itertools import chain
+from datatable import dt, fread, f
 
 log = logging.getLogger("my_logger")
 
@@ -220,6 +221,7 @@ def binary_search_filter(g, low, high, weights):
 
 
 def get_reps(graph, partition):
+    log.debug("Finding assembly representatives using eigenvector centrality")
     """
     This function finds the representative genomes based on centrality measures
     """
@@ -229,7 +231,9 @@ def get_reps(graph, partition):
         nodes = [k for k in partition if partition[k] == i]
         subgraph = graph.subgraph(nodes)
         subgraphs.append(subgraph)
-        cents = nx.eigenvector_centrality(subgraph, weight="weight", max_iter=1000)
+        cents = nx.eigenvector_centrality(
+            subgraph, weight="weight", max_iter=10000, tol=1e-04
+        )
         rep = max(cents.keys(), key=(lambda k: cents[k]))
         reps.append(rep)
     return reps, subgraphs
@@ -341,12 +345,22 @@ def map_slurm_jobs(cmds, slurm_config, odir, max_jobs_array, tmp_dir, threads):
 
 def check_pw(pw, assms):
     res = {}
-    if pw.empty:
+
+    if isinstance(pw, pd.DataFrame):
+        pw = dt.Frame(pw)
+
+    if pw.to_pandas().empty:
         res = {"missing": [], "failed": True}
         return res
 
+    dt_source = dt.unique(pw["source"])
+    dt_source.names = ["assm"]
+    dt_target = dt.unique(pw["target"])
+    dt_target.names = ["assm"]
+    dt_assms = dt.unique(dt.rbind([dt_source, dt_target]))
+    ids = dt_assms["assm"].to_list()[0]
     #    ids = list(set(pw["source"].tolist() + pw["target"].tolist()))
-    ids = list(set(pw.source).union(set(pw.target)))
+    # ids = list(set(pw.source).union(set(pw.target)))
     # Find if we are missing any assmebly (too divergent)
     diffs = list(set(assms) - set(ids))
     res = {"missing": diffs, "failed": False}
@@ -370,15 +384,15 @@ def concat_df(frames):
 
 
 def reduce_slurm_jobs(ofiles, threads):
-    if is_debug():
-        dfs = list(
-            map(process_fastANI_results, ofiles),
-        )
-    else:
-        p = Pool(threads)
-        dfs = list(
-            p.imap_unordered(process_fastANI_results, ofiles),
-        )
+    # if is_debug():
+    #     dfs = list(
+    #         map(process_fastANI_results, ofiles),
+    #     )
+    # else:
+    p = Pool(threads)
+    dfs = list(
+        p.imap_unordered(process_fastANI_results, ofiles),
+    )
     dfs = concat_df(dfs)
     return dfs
 
@@ -410,14 +424,252 @@ def estimate_frag_len(all_assemblies):
     return frag_len
 
 
-def dereplicate(
-    all_assemblies,
-    threads,
-    threshold,
-    chunks,
-    slurm_config,
-    tmp_dir,
-    max_jobs_array,
+def create_graph(pairwise_distances):
+    M = nx.from_pandas_edgelist(
+        pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
+    )
+    G = nx.Graph()
+    for u, v, data in M.edges(data=True):
+        if not G.has_edge(u, v):
+            # set weight to 1 if no weight is given for edge in M
+            weight = mean(d.get("weight", 0) for d in M.get_edge_data(u, v).values())
+            G.add_edge(u, v, weight=weight)
+    # Remove self loops
+    G.remove_edges_from(list(nx.selfloop_edges(G)))
+    # Identify isolated nodes
+    isolated = list(nx.isolates(G))
+    G.remove_nodes_from(isolated)
+    return G.to_undirected(), isolated
+
+
+def filter_graph(G):
+    graphs_filt = []
+    w_filts = []
+    if G.number_of_edges() > 2:
+        # TODO: Check how many components do we have
+        n_comp = nx.number_connected_components(G)
+        if n_comp > 1:
+            log.debug("Graph with {} component(s".format(n_comp))
+            for component in sorted(nx.connected_components(G), key=len, reverse=True):
+                component = G.subgraph(component).copy()
+                weights = []
+
+                for u, v, d in component.edges(data=True):
+                    weights.append(d["weight"])
+
+                weights = sorted(set(weights))
+                log.debug("Filtering graph")
+                G_filt, w_filt = binary_search_filter(
+                    g=component, low=0, high=len(weights) - 1, weights=weights
+                )
+                graphs_filt.append(G_filt)
+                w_filts.append(w_filt)
+        else:
+            weights = []
+            for u, v, d in G.edges(data=True):
+                weights.append(d["weight"])
+            weights = sorted(set(weights))
+            log.debug("Filtering ANI graph")
+            G_filt, w_filt = binary_search_filter(
+                g=G, low=0, high=len(weights) - 1, weights=weights
+            )
+            graphs_filt.append(G_filt)
+            w_filts.append(w_filt)
+    else:
+        log.debug("Skipping graph filtering, number of edges <=2")
+        graphs_filt = [G]
+        w_filts = [None]
+    # partition = community_louvain.best_partition(G_filt, resolution=1.0)
+    G_filt = nx.compose_all(graphs_filt)
+    w_filt = ",".join(map(lambda x: str(x), w_filts))
+    return G_filt, w_filt
+
+
+def get_communities(G_filt):
+    log.debug("Finding genome communities using Leiden community detection algorithm")
+    g = __from_nx_to_igraph(G_filt, directed=False)
+    part = leidenalg.find_partition(
+        g, leidenalg.ModularityVertexPartition, weights="weight"
+    )
+    leiden_coms = [g.vs[x]["name"] for x in part]
+    partition = {k: i for i, sub_l in enumerate(leiden_coms) for k in sub_l}
+
+    return partition
+
+
+def create_mash_sketch(fname, temp_dir, threads):
+    sketches = os.path.join(temp_dir, "mash.msh")
+
+    mash_command = [
+        "mash",
+        "sketch",
+        "-p",
+        str(threads),
+        "-o",
+        temp_dir + "/mash",
+        "-s",
+        "10000",
+        "-l",
+        fname,
+    ]
+    log.debug("Generating MASH sketches")
+    subprocess.run(mash_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    return sketches
+
+
+def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
+    dt.options.nthreads = threads
+    dt.options.progress.enabled = False
+    mash_fout = os.path.join(temp_dir, "msh.out")
+    mash_command = [
+        "mash",
+        "dist",
+        "-p",
+        str(threads),
+        mash_sketch,
+        mash_sketch,
+    ]
+    # mash_out = subprocess.run(mash_command, stdout=subprocess.PIPE).stdout.decode()
+    log.debug("Running MASH")
+    with open(mash_fout, "w") as fname:
+        subprocess.run(mash_command, stdout=fname, stderr=subprocess.STDOUT)
+
+    log.debug("Reading MASH results")
+    mash_out = fread(mash_fout, columns=range(0, 3), nthreads=threads)
+    mash_out.names = ["source", "target", "weight"]
+    mash_out[:, "weight"] = mash_out[:, 1 - f.weight]
+    log.debug("Extracting comparisons with MASH distance >= {}".format(mash_threshold))
+    mash_out = mash_out[f.weight >= mash_threshold, :]
+    log.debug("Adding genome lengths")
+    # df = mash_out.to_pandas()
+
+    # df = pd.DataFrame(mash_out, columns=["source", "target", "weight"])
+    # df["weight"] = df["weight"].astype(float)
+    # df["weight"] = df["weight"].apply(lambda x: 1.0 - x)
+
+    dt_source = dt.unique(mash_out["source"])
+    dt_source.names = ["assm"]
+    dt_target = dt.unique(mash_out["target"])
+    dt_target.names = ["assm"]
+
+    dt_assms = dt.unique(dt.rbind([dt_source, dt_target]))
+
+    p = Pool(threads)
+    dt_assms["len"] = dt.Frame(
+        list(p.map(get_assembly_length, dt_assms["assm"].to_list()[0]))
+    )
+
+    dt_assms.names = ["source", "source_len"]
+    dt_assms.key = "source"
+    mash_out = mash_out[:, :, dt.join(dt_assms)]
+
+    dt_assms.names = ["target", "target_len"]
+    dt_assms.key = "target"
+    mash_out = mash_out[:, :, dt.join(dt_assms)]
+
+    return mash_out
+
+
+def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold):
+    partitions = []
+    all_assemblies_tmp = all_assemblies.copy()
+    w_filt = 1 - mash_threshold
+
+    with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-mash") as temp_dir:
+        fname = os.path.join(temp_dir, "assemblies.txt")
+        all_assemblies_tmp["assembly"].to_csv(fname, index=False, header=False)
+        mash_sketch = create_mash_sketch(fname, temp_dir, threads)
+        mash_dist = run_mash(
+            mash_sketch, threads=threads, mash_threshold=w_filt, temp_dir=temp_dir
+        )
+
+    log.debug("Checking we have all genomes")
+    pw = check_pw(pw=mash_dist, assms=all_assemblies_tmp["assembly"].tolist())
+
+    if pw["failed"]:
+        log.debug("Failed. Reason: Assemblies too divergent")
+        failed = "Assemblies too divergent"
+        return None, None, failed
+
+    missing = pw["missing"]
+
+    if len(missing) > 0:
+        log.debug(
+            "Missing {:,} assemblies in the fastANI comparison, Assemblies too divergent".format(
+                len(missing)
+            )
+        )
+
+    # Convert pw dist to graph
+    log.debug("Generating MASH graph")
+    # mash_dist = mash_dist[(mash_dist.weight >= float(w_filt))]
+
+    G, isolated = create_graph(mash_dist.to_pandas())
+    if G.number_of_edges() == 0:
+        log.debug("Only self loops found")
+        all_assemblies_tmp.loc[:, "representative"] = 1
+        all_assemblies_tmp.loc[:, "derep"] = 1
+
+        return all_assemblies_tmp
+
+    # TODO: streamline this
+    # G_filt, w_filt = filter_graph(G)
+    # edges2rm = [
+    #     (u, v) for u, v, d in G.edges(data=True) if float(d["weight"]) <= float(w_filt)
+    # ]
+    # G.remove_edges_from(edges2rm)
+    G_filt = G
+    partition = get_communities(G_filt)
+
+    log.debug(
+        "Graph properties: w_filt={} components={} edges={} communities={}".format(
+            w_filt,
+            nx.number_connected_components(G_filt),
+            G_filt.number_of_edges(),
+            len(set([partition[k] for k in partition])),
+        )
+    )
+    reps, subgraphs = get_reps(graph=G_filt, partition=partition)
+    derep_assemblies = []
+    for i in range(len(reps)):
+        candidates = refine_candidates(
+            rep=reps[i],
+            subgraph=subgraphs[i],
+            threshold=threshold,
+            pw=mash_dist,
+        )
+        if len(candidates) > 1:
+            for candidate in candidates:
+                derep_assemblies.append(candidate)
+        else:
+            derep_assemblies = candidates
+    derep_assemblies = list(set(derep_assemblies + reps + missing + isolated))
+    reps = reps + missing + isolated
+
+    if len(reps) > len(derep_assemblies):
+        log.debug(
+            "Less representatives {} than dereplicated assemblies {} !!!".format(
+                len(reps), len(derep_assemblies)
+            )
+        )
+        exit(0)
+
+    # all_assemblies = all_assemblies[
+    #     all_assemblies["assembly"].isin(derep_assemblies)
+    # ]
+    all_assemblies_tmp.loc[:, "representative"] = 0
+    all_assemblies_tmp.loc[
+        all_assemblies_tmp["assembly"].isin(reps), "representative"
+    ] = 1
+    all_assemblies_tmp.loc[:, "derep"] = 0
+    all_assemblies_tmp.loc[
+        all_assemblies_tmp["assembly"].isin(derep_assemblies), "derep"
+    ] = 1
+    return all_assemblies_tmp
+
+
+def dereplicate_ANI(
+    all_assemblies, threads, threshold, chunks, slurm_config, tmp_dir, max_jobs_array
 ):
     """
     This function dereplicates genomes by Taxon by:
@@ -428,6 +680,7 @@ def dereplicate(
 
     derep_assemblies = []
     n_assemblies = all_assemblies.shape[0]
+    all_assemblies_tmp = all_assemblies.copy()
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
         failed = None
         if n_assemblies < 10 or slurm_config is None:
@@ -439,7 +692,7 @@ def dereplicate(
                 )
             )
 
-            frag_len = estimate_frag_len(all_assemblies)
+            frag_len = estimate_frag_len(all_assemblies_tmp)
 
             if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")
@@ -447,7 +700,7 @@ def dereplicate(
                 return None, None, failed
 
             ani_results = pairwise_fastANI(
-                assemblies=all_assemblies["assembly"].tolist(),
+                assemblies=all_assemblies_tmp["assembly"].tolist(),
                 threads=threads,
                 temp_dir=temp_dir,
                 frag_len=frag_len,
@@ -458,15 +711,15 @@ def dereplicate(
             log.debug("Obtained {:,} comparisons".format(pairwise_distances.shape[0]))
         else:
             n = chunks
-            chunks = split_fixed_size(all_assemblies["assembly"].tolist(), n)
+            chunks = split_fixed_size(all_assemblies_tmp["assembly"].tolist(), n)
 
             log.debug(
                 "Found {} assemblies, creating {} chunks with {} genomes".format(
-                    len(all_assemblies), len(chunks), n
+                    len(all_assemblies_tmp), len(chunks), n
                 )
             )
 
-            frag_len = estimate_frag_len(all_assemblies)
+            frag_len = estimate_frag_len(all_assemblies_tmp)
 
             if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")
@@ -485,7 +738,9 @@ def dereplicate(
             log.debug("Reducing SLURM jobs and processing ANI results")
             # pairwise_distances = reduce_slurm_jobs(ofiles, threads)
 
-        pw = check_pw(pw=pairwise_distances, assms=all_assemblies["assembly"].tolist())
+        pw = check_pw(
+            pw=pairwise_distances, assms=all_assemblies_tmp["assembly"].tolist()
+        )
 
         if pw["failed"]:
             log.debug("Failed. Reason: Assemblies too divergent")
@@ -501,32 +756,18 @@ def dereplicate(
                 )
             )
 
-        pairwise_distances[
-            ["source", "target", "ANI", "source_len", "target_len"]
-        ].to_csv("test.tsv", index=False, sep="\t")
+        # pairwise_distances[
+        #     ["source", "target", "ANI", "source_len", "target_len"]
+        # ].to_csv("test.tsv", index=False, sep="\t")
         # Convert pw dist to graph
         log.debug("Generating ANI graph")
-        M = nx.from_pandas_edgelist(
-            pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
-        )
-        G = nx.Graph()
-        for u, v, data in M.edges(data=True):
-            if not G.has_edge(u, v):
-                # set weight to 1 if no weight is given for edge in M
-                weight = mean(
-                    d.get("weight", 1) for d in M.get_edge_data(u, v).values()
-                )
-                G.add_edge(u, v, weight=weight)
-        # Remove self loops
-        G.remove_edges_from(list(nx.selfloop_edges(G)))
-        # Identify isolated nodes
-        isolated = list(nx.isolates(G))
-        G.remove_nodes_from(isolated)
+
+        G, isolated = create_graph(pairwise_distances)
 
         if G.number_of_edges() == 0:
             log.debug("Only self loops found")
-            all_assemblies.loc[:, "representative"] = 1
-            all_assemblies.loc[:, "derep"] = 1
+            all_assemblies_tmp.loc[:, "representative"] = 1
+            all_assemblies_tmp.loc[:, "derep"] = 1
 
             results = pd.DataFrame(
                 [
@@ -539,62 +780,12 @@ def dereplicate(
                 ],
                 columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
             )
-            return all_assemblies, results, failed
+            return all_assemblies_tmp, results, failed
 
         # TODO: streamline this
+        G_filt, w_filt = filter_graph(G)
 
-        graphs_filt = []
-        w_filts = []
-        if G.number_of_edges() > 2:
-            # TODO: Check how many components do we have
-            n_comp = nx.number_connected_components(G)
-            if n_comp > 1:
-                log.debug("Graph with {} component(s".format(n_comp))
-                for component in sorted(
-                    nx.connected_components(G), key=len, reverse=True
-                ):
-                    component = G.subgraph(component).copy()
-                    weights = []
-
-                    for u, v, d in component.edges(data=True):
-                        weights.append(d["weight"])
-
-                    weights = sorted(set(weights))
-                    log.debug("Filtering ANI graph")
-                    G_filt, w_filt = binary_search_filter(
-                        g=component, low=0, high=len(weights) - 1, weights=weights
-                    )
-                    graphs_filt.append(G_filt)
-                    w_filts.append(w_filt)
-            else:
-                weights = []
-                for u, v, d in G.edges(data=True):
-                    weights.append(d["weight"])
-                weights = sorted(set(weights))
-                log.debug("Filtering ANI graph")
-                G_filt, w_filt = binary_search_filter(
-                    g=G, low=0, high=len(weights) - 1, weights=weights
-                )
-                graphs_filt.append(G_filt)
-                w_filts.append(w_filt)
-        else:
-            log.debug("Skipping graph filtering, number of edges <=2")
-            graphs_filt = [G]
-            w_filts = [None]
-        log.debug(
-            "Finding genome representatives using Louvain + eigenvector centrality"
-        )
-        # partition = community_louvain.best_partition(G_filt, resolution=1.0)
-        G_filt = nx.compose_all(graphs_filt)
-        w_filt = ",".join(map(lambda x: str(x), w_filts))
-
-        g = __from_nx_to_igraph(G_filt, directed=False)
-
-        part = leidenalg.find_partition(
-            g, leidenalg.ModularityVertexPartition, weights="weight"
-        )
-        leiden_coms = [g.vs[x]["name"] for x in part]
-        partition = {k: i for i, sub_l in enumerate(leiden_coms) for k in sub_l}
+        partition = get_communities(G_filt)
 
         log.debug(
             "Graph properties: w_filt={} components={} edges={} communities={}".format(
@@ -628,14 +819,14 @@ def dereplicate(
     reps = reps + missing + isolated
 
     log.debug(
-        "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies))
+        "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies_tmp))
     )
     results = pd.DataFrame(
         [
             (
                 w_filt,
                 len(set([partition[k] for k in partition])),
-                len(all_assemblies),
+                len(all_assemblies_tmp),
                 len(derep_assemblies),
             )
         ],
@@ -649,24 +840,29 @@ def dereplicate(
             )
         )
         exit(0)
-    rep_keys = all_assemblies[all_assemblies["assembly"].isin(reps)][
+
+    rep_keys = all_assemblies_tmp[all_assemblies_tmp["assembly"].isin(reps)][
         "accession"
     ].tolist()
+
     # all_assemblies = all_assemblies[
     #     all_assemblies["assembly"].isin(derep_assemblies)
     # ]
-    all_assemblies.loc[:, "representative"] = 0
-    all_assemblies.loc[all_assemblies["accession"].isin(rep_keys), "representative"] = 1
-
-    all_assemblies.loc[:, "derep"] = 0
-    all_assemblies.loc[all_assemblies["assembly"].isin(derep_assemblies), "derep"] = 1
-
-    return all_assemblies, results, failed
+    all_assemblies_tmp.loc[:, "representative"] = 0
+    all_assemblies_tmp.loc[
+        all_assemblies_tmp["assembly"].isin(reps), "representative"
+    ] = 1
+    all_assemblies_tmp.loc[:, "derep"] = 0
+    all_assemblies_tmp.loc[
+        all_assemblies_tmp["assembly"].isin(derep_assemblies), "derep"
+    ] = 1
+    return all_assemblies_tmp, results, failed
 
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):
     results = []
-
+    if isinstance(pw, dt.Frame):
+        pw = pw.to_pandas()
     if subgraph.number_of_edges() == 0:
         return [rep]
     for reachable_node in nx.all_neighbors(subgraph, rep):
@@ -687,36 +883,28 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
             source_len = mean(df.source_len.values)
             target_len = mean(df.target_len.values)
             len_diff = abs(source_len - target_len)
-
-            aln_frac = mean(df.aln_frac.values)
             weight = mean(df.weight.values)
-            # source_len = df[df["source"] == rep].iloc[0]["source_len"]
-            # target_len = df[df["source"] == rep].iloc[0]["target_len"]
-            # len_diff = abs(source_len - target_len)
 
-            # source_aln = df[df["source"] == rep].iloc[0]["aln_frac"]
-            # if df.shape[0] > 1:
-            #     target_aln = df[df["source"] != rep].iloc[0]["aln_frac"]
-            #     aln_frac = mean([source_aln, target_aln])
-            # else:
-            #     aln_frac = source_aln
-
-            # source_w = df[df["source"] == rep].iloc[0]["weight"]
-            # if df.shape[0] > 1:
-            #     target_w = df[df["source"] != rep].iloc[0]["weight"]
-            #     weight = mean([source_w, target_w])
-            # else:
-            #     weight = source_w
-
-            results.append(
-                {
-                    "source": rep,
-                    "target": reachable_node,
-                    "weight": float(weight),
-                    "aln_frac": float(aln_frac),
-                    "len_diff": int(len_diff),
-                }
-            )
+            if "aln_frac" in df.columns:
+                aln_frac = mean(df.aln_frac.values)
+                results.append(
+                    {
+                        "source": rep,
+                        "target": reachable_node,
+                        "weight": float(weight),
+                        "aln_frac": float(aln_frac),
+                        "len_diff": int(len_diff),
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "source": rep,
+                        "target": reachable_node,
+                        "weight": float(weight),
+                        "len_diff": int(len_diff),
+                    }
+                )
     df = pd.DataFrame(results)
 
     if len(df.index) < 2:
@@ -731,19 +919,24 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
         else:
             assms = [rep]
     else:
-        if is_unique(df["aln_frac"]):
-            df["z_score_aln"] = 0
-        else:
-            df["z_score_aln"] = stats.zscore(df["aln_frac"])
+        if "aln_frac" in df.columns:
+            if is_unique(df["aln_frac"]):
+                df["z_score_aln"] = 0
+            else:
+                df["z_score_aln"] = stats.zscore(df["aln_frac"])
         if is_unique(df["len_diff"]):
             df["z_score_diff"] = 0
         else:
             df["z_score_diff"] = stats.zscore(df["len_diff"])
 
-        df = df[
-            (df["z_score_aln"] <= (-1 * threshold))
-            | (df["z_score_diff"].abs() >= threshold)
-        ]
+        if "aln_frac" in df.columns:
+            df = df[
+                (df["z_score_aln"] <= (-1 * threshold))
+                | (df["z_score_diff"].abs() >= threshold)
+            ]
+        else:
+            df = df[(df["z_score_diff"].abs() >= threshold)]
+
         assms = df["target"].tolist()
         assms.append(rep)
 
