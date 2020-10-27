@@ -1,10 +1,4 @@
 """
-This script will dereplicate GTDB assemblies to a user-specified threshold, copying the
-dereplicated assemblies to a new directory.
-
-Usage:
-    dereplicate_assemblies.py --threshold 0.005 assemblies derep bac_and_arc_taxonomy_r86.tsv
-
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU
 General Public License as published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
@@ -32,8 +26,9 @@ from derep_genomes.general import (
     get_assembly_filename,
     applyParallel,
     is_debug,
+    get_assembly_length,
 )
-from derep_genomes.graph import dereplicate
+from derep_genomes.graph import dereplicate_ANI, dereplicate_mash, concat_df
 import logging
 import pathlib
 import sqlite3
@@ -74,7 +69,7 @@ def process_one_taxon(taxon, parms):
     slurm_config = parms["slurm_config"]
     tmp_dir = parms["tmp_dir"]
     max_jobs_array = parms["max_jobs_array"]
-
+    mash_threshold = parms["mash_threshold"]
     failed_df = None
 
     log.debug("Dereplicating {}".format(taxon))
@@ -91,8 +86,39 @@ def process_one_taxon(taxon, parms):
                 n_assemblies
             )
         )
-        derep_assemblies, results, failed = dereplicate(
+
+        log.debug("Preclustering with MASH...")
+        acc_to_assemblies_mash = dereplicate_mash(
             all_assemblies=acc_to_assemblies,
+            threads=threads,
+            tmp_dir=tmp_dir,
+            mash_threshold=mash_threshold,
+            threshold=threshold,
+        )
+        acc_to_assemblies_mash_r = acc_to_assemblies_mash[
+            acc_to_assemblies_mash["representative"] == 1
+        ].copy()
+        acc_to_assemblies_mash_d = acc_to_assemblies_mash[
+            acc_to_assemblies_mash["derep"] == 1
+        ].copy()
+        acc_to_assemblies_mash_o = acc_to_assemblies_mash[
+            acc_to_assemblies_mash["derep"] == 0
+        ].copy()
+
+        log.debug(
+            "Identified {:,} linked assemblies in {:,} MASH communities".format(
+                acc_to_assemblies_mash_d.shape[0], acc_to_assemblies_mash_r.shape[0]
+            )
+        )
+
+        # We refine each MASH community
+        log.debug(
+            "Refining {:,} MASH selected assemblies".format(
+                acc_to_assemblies_mash_d.shape[0]
+            )
+        )
+        derep_assemblies, results, failed = dereplicate_ANI(
+            all_assemblies=acc_to_assemblies_mash_d,
             threads=threads,
             threshold=threshold,
             chunks=chunks,
@@ -106,14 +132,15 @@ def process_one_taxon(taxon, parms):
             failed_df.loc[:, "taxon"] = taxon
             failed_df.loc[:, "reason"] = failed
             failed_df = failed_df[["taxon", "accession", "file", "reason"]]
-
         else:
             # Add taxa to taxa table
+            derep_assemblies = concat_df([derep_assemblies, acc_to_assemblies_mash_o])
             derep_assemblies.loc[:, "taxon"] = taxon
             derep_assemblies.loc[:, "file"] = derep_assemblies["assembly"].apply(
                 os.path.basename
             )
             results.loc[:, "taxon"] = taxon
+
         return derep_assemblies, results, failed_df
 
 
@@ -496,6 +523,20 @@ def main():
         assm_min = 2
         assm_max = 10
 
+        # log.info("Calculating assembly lengths")
+
+        # p = Pool(args.threads)
+        # to_do.loc[:, "len"] = list(
+        #     tqdm.tqdm(
+        #         p.imap(get_assembly_length, to_do["assembly"].to_list()),
+        #         total=to_do.shape[0],
+        #         leave=False,
+        #         ncols=80,
+        #     )
+        # )
+        # print(to_do)
+        # exit(0)
+
         log.info(
             "Splitting taxa in groups of singleton, between {}-{} and more than {} assemblies\n".format(
                 assm_min, assm_max, assm_max
@@ -528,7 +569,6 @@ def main():
         ].reset_index(drop=True)
 
         if not classification_singletons.empty:
-
             log.info(
                 "Processing {:,} singletons".format(classification_singletons.shape[0])
             )
@@ -553,6 +593,7 @@ def main():
                 "slurm_config": None,
                 "tmp_dir": tmp_dir,
                 "max_jobs_array": args.max_jobs_array,
+                "mash_threshold": args.mash_threshold,
             }
 
             if args.threads > 2:
@@ -631,6 +672,7 @@ def main():
                 "slurm_config": args.slurm_config.name,
                 "tmp_dir": tmp_dir,
                 "max_jobs_array": args.max_jobs_array,
+                "mash_threshold": args.mash_threshold,
             }
 
             if is_debug():

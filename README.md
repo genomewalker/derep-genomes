@@ -5,7 +5,7 @@
 [![GitHub release (latest by date including pre-releases)](https://img.shields.io/github/v/release/genomewalker/derep-genomes?include_prereleases&label=version)](https://github.com/genomewalker/derep-genomes/releases) [![derep-genomes](https://github.com/genomewalker/derep-genomes/workflows/derepG_ci/badge.svg)](https://github.com/genomewalker/derep-genomes/actions) [![PyPI](https://img.shields.io/pypi/v/derep-genomes)](https://pypi.org/project/derep-genomes/) [![Conda](https://img.shields.io/conda/v/genomewalker/derep-genomes)](https://anaconda.org/genomewalker/derep-genomes)
 
 
-DeRepG is a simple genome de-replication tool using [**fastANI**](https://github.com/ParBLiSS/FastANI) and a bit of graph-based analysis. The main objective of DeRepG is to obtain a collection of assemblies that can be used by [**Kraken2**](https://github.com/DerrickWood/kraken2), [**Kaiju**](https://github.com/bioinformatics-centre/kaiju) or [**MMseqs2 taxonomy**](https://github.com/soedinglab/MMseqs2/wiki#taxonomy-assignment) module. It uses a similar approach to the one described in [**Méric, Wick et al. (2019)**](https://www.biorxiv.org/content/10.1101/712166v1) and in [**Parks et al. (2020)**](https://rdcu.be/b3OI7) where they cluster assemblies based on a similarity measure combined with the clustering of the graph after applying a filtering cutoff. In our case, we use as similarity metric the ANI similarity weighted by the fraction aligned, and we don't apply a hard threshold. We follow a different approach where we trim the full connected network of assemblies per species group, using a re-iterated targeted attack by removing one by one the edges starting from those with the lowest similarity up to the one that would disconnect the network if removed. With this approach we let natural patterns emerge in the graph. Afterward, we use the [**Leiden community detection algorithm**](https://www.nature.com/articles/s41598-019-41695-z) to delineate communities in the graph, and then identify the most central assemblies by [**eigenvector centrality**](https://en.wikipedia.org/wiki/Eigenvector_centrality). Then, we extract subgraphs based on the neighbors of those central nodes and we keep those assemblies that are too different (z-score > 2) in terms of genome length and ANI similarity. 
+DeRepG is a simple genome de-replication tool using [**fastANI**](https://github.com/ParBLiSS/FastANI) and a bit of graph-based analysis. The main objective of DeRepG is to obtain a collection of assemblies that can be used by [**Kraken2**](https://github.com/DerrickWood/kraken2), [**Kaiju**](https://github.com/bioinformatics-centre/kaiju) or [**MMseqs2 taxonomy**](https://github.com/soedinglab/MMseqs2/wiki#taxonomy-assignment) module. It uses a similar approach to the one described in [**Méric, Wick et al. (2019)**](https://www.biorxiv.org/content/10.1101/712166v1) and in [**Parks et al. (2020)**](https://rdcu.be/b3OI7) where they cluster assemblies based on a similarity measure combined with the clustering of the graph after applying a filtering cutoff. In our case, we use as similarity metric the ANI similarity weighted by the fraction aligned, and we don't apply a hard threshold. We follow a different approach where we trim the full connected graph of assemblies per species group, using a re-iterated targeted attack by identifying the edge with the lowest weight that would disconnect the graph if removed. With this approach we let natural patterns emerge in the graph. Afterward, we use the [**Leiden community detection algorithm**](https://www.nature.com/articles/s41598-019-41695-z) to delineate communities in the graph, and then identify the most central assemblies by [**eigenvector centrality**](https://en.wikipedia.org/wiki/Eigenvector_centrality). Then, we extract subgraphs based on the neighbors of those central nodes and we keep those assemblies that are too different (z-score > 2) in terms of genome length and ANI similarity. To speed up the process we do a first MASH distance-based dereplication, where we keep all the edges with a MASH distance <= 0.01. We apply a similar procedure than the one previously described to identify communities and representatives in the MASH graph that will be used in the ANI clustering step. 
 
 While DeRepG can be used to dereplicate a set of genomes and obtain their representative, we cannot assure that it might be the best representative as we are only interested on having an enriched set of genomes for downstream taxonomic classification. For this purpose we recommend to use other approaches like [**Galah**](https://github.com/wwood/galah), [**dRep**](https://drep.readthedocs.io/) or the one described in [**Parks et al. (2020)**](https://rdcu.be/b3OI7).
 
@@ -71,16 +71,17 @@ required arguments:
   --taxa FILE           TSV file with the taxonomic information
 
 optional arguments:
-  -h, --help            show this help message and exit
-  --db DB               SQLite3 DB to store the results (default: derep-genomes.db)
-  --threads INT         Number of threads (for fastANI) (default: 16)
-  --tmp DIR             Temporary directory (default: /tmp)
-  --threshold FLOAT     Z-score filtering threshold (default: 2.0)
-  --selected-taxa FILE  File with selected taxa. Taxa should have the following formar: d__;p__;c__;o__;f__;g__;s__
-  --copy                Copy assembly files to the output folder (default: False)
-  --out-dir OUT_DIR     Directory where dereplicated assemblies will be copied
-  --debug               Print debug messages (default: False)
-  --version             Print program version
+  -h, --help              show this help message and exit
+  --db DB                 SQLite3 DB to store the results (default: derep-genomes.db)
+  --threads INT           Number of threads (for fastANI) (default: 16)
+  --tmp DIR               Temporary directory (default: /tmp)
+  --threshold FLOAT       Z-score filtering threshold (default: 2.0)
+  --mash-threhsold FLOAT  Mash distance threshold where to filter (default: 0.01)
+  --selected-taxa FILE    File with selected taxa. Taxa should have the following formar: d__;p__;c__;o__;f__;g__;s__
+  --copy                  Copy assembly files to the output folder (default: False)
+  --out-dir OUT_DIR       Directory where dereplicated assemblies will be copied
+  --debug                 Print debug messages (default: False)
+  --version               Print program version
 
 SLURM arguments:
   --slurm-config FILE   YAML configuration file for SLURM

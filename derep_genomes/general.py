@@ -25,13 +25,28 @@ def is_debug():
     return logging.getLogger("my_logger").getEffectiveLevel() == logging.DEBUG
 
 
+def check_values(val, minval, maxval, parser, var):
+    value = float(val)
+    if value < minval or value > maxval:
+        parser.error(
+            "argument %s: Invalid value %s. Range has to be between %s and %s!"
+            % (
+                var,
+                value,
+                minval,
+                maxval,
+            )
+        )
+    return value
+
+
 # From: https://stackoverflow.com/a/11541450
-def is_valid_file(parser, arg):
+def is_valid_file(parser, arg, var):
     if not os.path.exists(arg):
         if os.path.isfile(arg):
-            parser.error("The file %s does not exist!" % arg)
+            parser.error("argument %s: The file %s does not exist!" % (var, arg))
         else:
-            parser.error("The directory %s does not exist!" % arg)
+            parser.error("argument %s: The directory %s does not exist!" % (var, arg))
     else:
         if os.path.isfile(arg):
             return open(arg, "r")  # return an open file handle
@@ -53,6 +68,7 @@ help_msg = {
     "out_dir": "Directory where dereplicated assemblies will be copied",
     "debug": "Print debug messages",
     "version": "Print program version",
+    "mash_threshold": "Mash distance threshold where to filter",
 }
 
 
@@ -73,7 +89,7 @@ def get_arguments(argv=None):
         default=argparse.SUPPRESS,
         required=True,
         metavar="DIR",
-        type=lambda x: is_valid_file(parser, x),
+        type=lambda x: is_valid_file(parser, x, "--in-dir"),
         help=help_msg["in_dir"],
     )
     required.add_argument(
@@ -81,7 +97,7 @@ def get_arguments(argv=None):
         required=True,
         metavar="FILE",
         default=argparse.SUPPRESS,
-        type=lambda x: is_valid_file(parser, x),
+        type=lambda x: is_valid_file(parser, x, "--taxa"),
         dest="tax_file",
         help=help_msg["tax_file"],
     )
@@ -116,6 +132,16 @@ def get_arguments(argv=None):
         default=2.0,
         help=help_msg["threshold"],
     )
+    optional.add_argument(
+        "--mash-threshold",
+        metavar="FLOAT",
+        type=lambda x: check_values(
+            x, minval=0, maxval=1, parser=parser, var="--mash-threshold"
+        ),
+        default=0.01,
+        help=help_msg["mash_threshold"],
+        dest="mash_threshold",
+    )
     slurm.add_argument(
         "--slurm-config",
         dest="slurm_config",
@@ -123,7 +149,7 @@ def get_arguments(argv=None):
         required=False,
         help=help_msg["slurm_config"],
         metavar="FILE",
-        type=lambda x: is_valid_file(parser, x),
+        type=lambda x: is_valid_file(parser, x, "--slurm-config"),
     )
     slurm.add_argument(
         "--chunk-size",
@@ -147,7 +173,7 @@ def get_arguments(argv=None):
         required=False,
         metavar="FILE",
         default=argparse.SUPPRESS,
-        type=lambda x: is_valid_file(parser, x),
+        type=lambda x: is_valid_file(parser, x, "--selected-taxa"),
         help=help_msg["selected_taxa"],
     )
     optional.add_argument(
