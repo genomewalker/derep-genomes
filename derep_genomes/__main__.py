@@ -26,6 +26,7 @@ from derep_genomes.general import (
     get_assembly_filename,
     applyParallel,
     is_debug,
+    get_assembly_length,
 )
 from derep_genomes.graph import dereplicate_ANI, dereplicate_mash, concat_df
 import logging
@@ -522,6 +523,20 @@ def main():
         assm_min = 2
         assm_max = 10
 
+        # log.info("Calculating assembly lengths")
+
+        # p = Pool(args.threads)
+        # to_do.loc[:, "len"] = list(
+        #     tqdm.tqdm(
+        #         p.imap(get_assembly_length, to_do["assembly"].to_list()),
+        #         total=to_do.shape[0],
+        #         leave=False,
+        #         ncols=80,
+        #     )
+        # )
+        # print(to_do)
+        # exit(0)
+
         log.info(
             "Splitting taxa in groups of singleton, between {}-{} and more than {} assemblies\n".format(
                 assm_min, assm_max, assm_max
@@ -554,7 +569,6 @@ def main():
         ].reset_index(drop=True)
 
         if not classification_singletons.empty:
-
             log.info(
                 "Processing {:,} singletons".format(classification_singletons.shape[0])
             )

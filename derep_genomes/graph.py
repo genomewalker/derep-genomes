@@ -26,6 +26,7 @@ import tqdm
 import io, sys
 from itertools import chain
 from datatable import dt, fread, f
+from multiprocessing.pool import ThreadPool
 
 log = logging.getLogger("my_logger")
 
@@ -221,7 +222,7 @@ def binary_search_filter(g, low, high, weights):
 
 
 def get_reps(graph, partition):
-    log.debug("Finding assembly representatives using eigenvector centrality")
+    log.debug("Finding the most central assemblies in the graph")
     """
     This function finds the representative genomes based on centrality measures
     """
@@ -232,7 +233,7 @@ def get_reps(graph, partition):
         subgraph = graph.subgraph(nodes)
         subgraphs.append(subgraph)
         cents = nx.eigenvector_centrality(
-            subgraph, weight="weight", max_iter=10000, tol=1e-04
+            subgraph, weight="weight", max_iter=10000, tol=1e-4
         )
         rep = max(cents.keys(), key=(lambda k: cents[k]))
         reps.append(rep)
@@ -489,7 +490,11 @@ def get_communities(G_filt):
     log.debug("Finding genome communities using Leiden community detection algorithm")
     g = __from_nx_to_igraph(G_filt, directed=False)
     part = leidenalg.find_partition(
-        g, leidenalg.ModularityVertexPartition, weights="weight"
+        g,
+        leidenalg.ModularityVertexPartition,
+        weights="weight",
+        seed=1234,
+        n_iterations=-1,
     )
     leiden_coms = [g.vs[x]["name"] for x in part]
     partition = {k: i for i, sub_l in enumerate(leiden_coms) for k in sub_l}
@@ -540,7 +545,7 @@ def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
     mash_out[:, "weight"] = mash_out[:, 1 - f.weight]
     log.debug("Extracting comparisons with MASH distance >= {}".format(mash_threshold))
     mash_out = mash_out[f.weight >= mash_threshold, :]
-    log.debug("Adding genome lengths")
+    log.debug("Calculating genome lengths")
     # df = mash_out.to_pandas()
 
     # df = pd.DataFrame(mash_out, columns=["source", "target", "weight"])
@@ -554,9 +559,9 @@ def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
 
     dt_assms = dt.unique(dt.rbind([dt_source, dt_target]))
 
-    p = Pool(threads)
+    p = ThreadPool(processes=threads)
     dt_assms["len"] = dt.Frame(
-        list(p.map(get_assembly_length, dt_assms["assm"].to_list()[0]))
+        list(p.imap(get_assembly_length, dt_assms["assm"].to_list()[0]))
     )
 
     dt_assms.names = ["source", "source_len"]
@@ -622,10 +627,11 @@ def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold
     partition = get_communities(G_filt)
 
     log.debug(
-        "Graph properties: w_filt={} components={} edges={} communities={}".format(
+        "Graph properties: w_filt={} edges={} density={} components={} communities={}".format(
             w_filt,
-            nx.number_connected_components(G_filt),
             G_filt.number_of_edges(),
+            nx.density(G_filt),
+            nx.number_connected_components(G_filt),
             len(set([partition[k] for k in partition])),
         )
     )
@@ -788,10 +794,11 @@ def dereplicate_ANI(
         partition = get_communities(G_filt)
 
         log.debug(
-            "Graph properties: w_filt={} components={} edges={} communities={}".format(
+            "Graph properties: w_filt={} edges={} density={} components={} communities={}".format(
                 w_filt,
-                nx.number_connected_components(G_filt),
                 G_filt.number_of_edges(),
+                nx.density(G_filt),
+                nx.number_connected_components(G_filt),
                 len(set([partition[k] for k in partition])),
             )
         )
