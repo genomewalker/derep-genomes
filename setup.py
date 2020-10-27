@@ -10,7 +10,6 @@ requirements = [
     "PyYAML==5.3.1",
     "leidenalg>=0.8.2",
     "python-igraph>=0.8.3",
-    "datatable>=0.11.0"
 ]
 
 setup(

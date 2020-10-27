@@ -25,7 +25,6 @@ from multiprocessing import Pool
 import tqdm
 import io, sys
 from itertools import chain
-from datatable import dt, fread, f
 from multiprocessing.pool import ThreadPool
 
 log = logging.getLogger("my_logger")
@@ -347,19 +346,16 @@ def map_slurm_jobs(cmds, slurm_config, odir, max_jobs_array, tmp_dir, threads):
 def check_pw(pw, assms):
     res = {}
 
-    if isinstance(pw, pd.DataFrame):
-        pw = dt.Frame(pw)
-
-    if pw.to_pandas().empty:
+    if pw.empty:
         res = {"missing": [], "failed": True}
         return res
 
-    dt_source = dt.unique(pw["source"])
-    dt_source.names = ["assm"]
-    dt_target = dt.unique(pw["target"])
-    dt_target.names = ["assm"]
-    dt_assms = dt.unique(dt.rbind([dt_source, dt_target]))
-    ids = dt_assms["assm"].to_list()[0]
+    df_source = pw.source.drop_duplicates().to_frame()
+    df_source.columns = ["assm"]
+    df_target = pw.target.drop_duplicates().to_frame()
+    df_target.columns = ["assm"]
+    df_assms = concat_df([df_source, df_target]).drop_duplicates()
+    ids = df_assms["assm"].to_list()
     #    ids = list(set(pw["source"].tolist() + pw["target"].tolist()))
     # ids = list(set(pw.source).union(set(pw.target)))
     # Find if we are missing any assmebly (too divergent)
@@ -523,8 +519,7 @@ def create_mash_sketch(fname, temp_dir, threads):
 
 
 def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
-    dt.options.nthreads = threads
-    dt.options.progress.enabled = False
+
     mash_fout = os.path.join(temp_dir, "msh.out")
     mash_command = [
         "mash",
@@ -540,37 +535,31 @@ def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
         subprocess.run(mash_command, stdout=fname, stderr=subprocess.STDOUT)
 
     log.debug("Reading MASH results")
-    mash_out = fread(mash_fout, columns=range(0, 3), nthreads=threads)
-    mash_out.names = ["source", "target", "weight"]
-    mash_out[:, "weight"] = mash_out[:, 1 - f.weight]
+    mash_out = pd.read_csv(mash_fout, sep="\t", usecols=range(0, 3), header=None)
+    mash_out.columns = ["source", "target", "weight"]
+    mash_out.loc[:, "weight"] = 1 - mash_out["weight"]
     log.debug("Extracting comparisons with MASH distance >= {}".format(mash_threshold))
-    mash_out = mash_out[f.weight >= mash_threshold, :]
+    mash_out = mash_out[mash_out["weight"] >= mash_threshold]
     log.debug("Calculating genome lengths")
-    # df = mash_out.to_pandas()
 
     # df = pd.DataFrame(mash_out, columns=["source", "target", "weight"])
     # df["weight"] = df["weight"].astype(float)
     # df["weight"] = df["weight"].apply(lambda x: 1.0 - x)
 
-    dt_source = dt.unique(mash_out["source"])
-    dt_source.names = ["assm"]
-    dt_target = dt.unique(mash_out["target"])
-    dt_target.names = ["assm"]
-
-    dt_assms = dt.unique(dt.rbind([dt_source, dt_target]))
-
+    df_source = mash_out.source.drop_duplicates().reset_index(drop=True)
+    df_target = mash_out.target.drop_duplicates().reset_index(drop=True)
+    df_assms = pd.concat([df_source, df_target]).to_frame()
+    df_assms.columns = ["assm"]
     p = ThreadPool(processes=threads)
-    dt_assms["len"] = dt.Frame(
-        list(p.imap(get_assembly_length, dt_assms["assm"].to_list()[0]))
+    df_assms.loc[:, "len"] = list(
+        p.imap(get_assembly_length, df_assms["assm"].to_list())
     )
 
-    dt_assms.names = ["source", "source_len"]
-    dt_assms.key = "source"
-    mash_out = mash_out[:, :, dt.join(dt_assms)]
+    df_assms.columns = ["source", "source_len"]
+    mash_out = mash_out.merge(df_assms)
 
-    dt_assms.names = ["target", "target_len"]
-    dt_assms.key = "target"
-    mash_out = mash_out[:, :, dt.join(dt_assms)]
+    df_assms.columns = ["target", "target_len"]
+    mash_out = mash_out.merge(df_assms)
 
     return mash_out
 
@@ -609,7 +598,7 @@ def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold
     log.debug("Generating MASH graph")
     # mash_dist = mash_dist[(mash_dist.weight >= float(w_filt))]
 
-    G, isolated = create_graph(mash_dist.to_pandas())
+    G, isolated = create_graph(mash_dist)
     if G.number_of_edges() == 0:
         log.debug("Only self loops found")
         all_assemblies_tmp.loc[:, "representative"] = 1
@@ -868,8 +857,7 @@ def dereplicate_ANI(
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):
     results = []
-    if isinstance(pw, dt.Frame):
-        pw = pw.to_pandas()
+
     if subgraph.number_of_edges() == 0:
         return [rep]
     for reachable_node in nx.all_neighbors(subgraph, rep):
