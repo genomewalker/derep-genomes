@@ -29,6 +29,7 @@ from multiprocessing.pool import ThreadPool
 
 log = logging.getLogger("my_logger")
 
+
 # From https://github.com/GiulioRossetti/cdlib/blob/master/cdlib/utils.py#L79
 def __from_nx_to_igraph(g, directed=None):
     """
@@ -109,6 +110,7 @@ def process_fastANI_results(rfile):
     # log.debug("Loaded {} comparinsons from ANI file".format(df.shape[0]))
     df["aln_frac"] = df["frags"] / df["total_frags"]
     df["weight"] = df["ANI"].div(100)
+    df["weight_raw"] = df["ANI"].div(100)
     df["weight"] = df["weight"] * df["aln_frac"]
     df1 = pd.DataFrame(
         set(df["source"].tolist() + df["target"].tolist()),
@@ -857,7 +859,8 @@ def dereplicate_ANI(
 
 def refine_candidates(rep, subgraph, pw, threshold=2.0):
     results = []
-
+    len_diff = 0
+    source_len = 0
     if subgraph.number_of_edges() == 0:
         return [rep]
     for reachable_node in nx.all_neighbors(subgraph, rep):
@@ -919,6 +922,7 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
                 df["z_score_aln"] = 0
             else:
                 df["z_score_aln"] = stats.zscore(df["aln_frac"])
+
         if is_unique(df["len_diff"]):
             df["z_score_diff"] = 0
         else:
@@ -926,7 +930,7 @@ def refine_candidates(rep, subgraph, pw, threshold=2.0):
 
         if "aln_frac" in df.columns:
             df = df[
-                (df["z_score_aln"] <= (-1 * threshold))
+                (df["z_score_aln"].abs() >= threshold)
                 | (df["z_score_diff"].abs() >= threshold)
             ]
         else:
