@@ -6,7 +6,15 @@ import os
 from pathlib import Path
 import pandas as pd
 
-tables = ["taxa", "genomes", "genomes_derep", "results", "jobs_done", "jobs_failed"]
+tables = [
+    "taxa",
+    "genomes",
+    "genomes_derep",
+    "results",
+    "jobs_done",
+    "jobs_failed",
+    "stats",
+]
 
 log = logging.getLogger("my_logger")
 
@@ -59,6 +67,9 @@ def create_db_tables(con):
     results_table = "CREATE TABLE results(taxon TEXT PRIMARY KEY, weight REAL, communities INTEGER, n_genomes INTEGER, n_genomes_derep INTEGER)"
     results_table_idx = "CREATE INDEX idx_results_taxon ON results (taxon);"
 
+    stats_table = "CREATE TABLE stats(taxon TEXT, representative TEXT PRIMARY KEY, n_nodes INTEGER, n_nodes_selected INTEGER, n_nodes_discarded INTEGER, graph_avg_weight REAL, graph_sd_weight REAL, graph_avg_weight_raw REAL, graph_sd_weight_raw REAL, subgraph_selected_avg_weight REAL, subgraph_selected_sd_weight REAL, subgraph_selected_avg_weight_raw REAL, subgraph_selected_sd_weight_raw REAL, subgraph_discarded_avg_weight REAL,subgraph_discarded_sd_weight REAL, subgraph_discarded_avg_weight_raw REAL, subgraph_discarded_sd_weight_raw REAL)"
+    stats_table_idx = "CREATE INDEX idx_stats_taxon ON stats (representative);"
+
     jobs_done_table = (
         "CREATE TABLE jobs_done(taxon TEXT, accession TEXT PRIMARY KEY, file TEXT)"
     )
@@ -74,12 +85,14 @@ def create_db_tables(con):
     con.execute(results_table)
     con.execute(jobs_done_table)
     con.execute(failed_table)
+    con.execute(stats_table)
     # Create indices
     con.execute(tax_table_idx)
     con.execute(genomes_table_idx)
     con.execute(genomes_derep_table_idx)
     con.execute(results_table_idx)
     con.execute(failed_table_idx)
+    con.execute(stats_table_idx)
 
     try:
         con.commit()
