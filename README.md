@@ -47,7 +47,6 @@ By cloning in a dedicated conda environment
 ```bash
 git clone git@github.com:genomewalker/derep-genomes.git
 cd derep-genomes
-git checkout dev
 conda env create -f environment.yml
 conda activate derep-genomes
 pip install -e .
