@@ -426,11 +426,13 @@ def find_assemblies(x, classifications, all_assm):
     res = find_assemblies_for_accessions(accessions=accessions, all_assemblies=all_assm)
     return res
 
-
+#TODO: Improve the matching between filenames and accessions
 def shorten_accession(accession):
     if accession.startswith("GCF_") or accession.startswith("GCA_"):
         accession = accession.split(".")[0]
         assert len(accession) == 13
+    else:
+        accession = accession.split(".")[0]
     return accession
 
 
@@ -515,6 +517,7 @@ def main():
     )
     all_assemblies_df = list(map(get_accession, all_assemblies))
     assm_data = classifications_df.merge(pd.DataFrame(all_assemblies_df))
+
     assm_data.loc[:, "file"] = assm_data["assembly"].apply(os.path.basename)
 
     if args.selected_taxa:
