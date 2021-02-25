@@ -1,9 +1,11 @@
 import math
 import tempfile
-from statistics import mean, median
+from statistics import mean, median, stdev
 import leidenalg
 import networkx as nx
 import igraph as ig
+from networkx.generators.geometric import thresholded_random_geometric_graph
+from numpy.lib.function_base import select
 import pandas as pd
 from scipy import stats
 import subprocess
@@ -18,16 +20,200 @@ from derep_genomes.general import (
 import logging
 from pathlib import Path
 import os
-from itertools import product
+from itertools import product, chain
 from simple_slurm import Slurm
 import yaml
 from multiprocessing import Pool
 import tqdm
 import io, sys
-from itertools import chain
 from multiprocessing.pool import ThreadPool
 
 log = logging.getLogger("my_logger")
+
+
+class representative:
+    def __init__(self, name, graph, pw, threshold=2.0):
+        self.name = name
+        self.n_nodes = len(list(graph.nodes))
+        self.graph_avg_weight = None
+        self.graph_sd_weight = None
+        self.graph_avg_weight_raw = None
+        self.graph_sd_weight_raw = None
+
+        self.subgraph_selected_avg_weight = None
+        self.subgraph_selected_sd_weight = None
+        self.subgraph_selected_avg_weight_raw = None
+        self.subgraph_selected_sd_weight_raw = None
+
+        self.subgraph_discarded_avg_weight = None
+        self.subgraph_discarded_sd_weight = None
+        self.subgraph_discarded_avg_weight_raw = None
+        self.subgraph_discarded_sd_weight_raw = None
+
+        self.selected = self.refine_candidates(
+            subgraph=graph, pw=pw, threshold=threshold
+        )
+
+        (
+            self.graph_avg_weight,
+            self.graph_sd_weight,
+            self.graph_avg_weight_raw,
+            self.graph_sd_weight_raw,
+        ) = self.get_global_stats(g=graph)
+
+        selected = self.selected + [self.name]
+
+        if len(selected) > 1:
+            (
+                self.subgraph_selected_avg_weight,
+                self.subgraph_selected_sd_weight,
+                self.subgraph_selected_avg_weight_raw,
+                self.subgraph_selected_sd_weight_raw,
+            ) = self.get_subgraph_selected(g=graph, nodes=selected)
+
+        self.discarded = [x for x in list(graph.nodes) if x not in self.selected]
+
+        discarded = self.discarded
+
+        if len(discarded) > 1:
+            (
+                self.subgraph_discarded_avg_weight,
+                self.subgraph_discarded_sd_weight,
+                self.subgraph_discarded_avg_weight_raw,
+                self.subgraph_discarded_sd_weight_raw,
+            ) = self.get_subgraph_discarded(g=graph, nodes=discarded)
+
+        self.n_nodes_selected = len(self.selected)
+        self.n_nodes_discarded = len(self.discarded) - 1
+
+    def get_weight_stats(self, g):
+        weights = []
+        weights_raw = []
+        for u, v, d in g.edges(data=True):
+            weights.append(d["weight"])
+            weights_raw.append(d["weight_raw"])
+        # if len(list(g.edges)) > 1:
+        mean_weight = mean(weights)
+        mean_weight_raw = mean(weights_raw)
+        if len(list(g.edges)) > 1:
+            sd_weight = stdev(weights)
+            sd_weight_raw = stdev(weights_raw)
+        else:
+            sd_weight = None
+            sd_weight_raw = None
+
+        return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
+
+    def get_global_stats(self, g):
+        mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
+            g=g
+        )
+        return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
+
+    def get_subgraph_selected(self, g, nodes):
+        weights = []
+        weights_raw = []
+        subgraph = nx.subgraph(g, nodes)
+        mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
+            g=subgraph
+        )
+        return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
+
+    def get_subgraph_discarded(self, g, nodes):
+        weights = []
+        weights_raw = []
+        subgraph = nx.subgraph(g, nodes)
+        mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
+            g=subgraph
+        )
+        return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
+
+    def refine_candidates(self, subgraph, pw, threshold):
+        rep = self.name
+        results = []
+        len_diff = 0
+        source_len = 0
+        if subgraph.number_of_edges() == 0:
+            return [rep]
+        for reachable_node in nx.all_neighbors(subgraph, rep):
+            if reachable_node != rep:
+                idx = pw["target"] == rep
+                pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
+                    idx, ["target", "source", "target_len", "source_len"]
+                ].values
+
+                df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
+
+                # Switch column order
+                # idx = df["target"] == rep
+                # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
+                #     idx, ["target", "source", "target_len", "source_len"]
+                # ].values
+
+                source_len = mean(df.source_len.values)
+                target_len = mean(df.target_len.values)
+                len_diff = abs(source_len - target_len)
+                weight = mean(df.weight.values)
+
+                if "aln_frac" in df.columns:
+                    aln_frac = mean(df.aln_frac.values)
+                    results.append(
+                        {
+                            "source": rep,
+                            "target": reachable_node,
+                            "weight": float(weight),
+                            "aln_frac": float(aln_frac),
+                            "len_diff": int(len_diff),
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "source": rep,
+                            "target": reachable_node,
+                            "weight": float(weight),
+                            "len_diff": int(len_diff),
+                        }
+                    )
+        df = pd.DataFrame(results)
+
+        if len(df.index) < 2:
+            if len_diff > 0:
+                diff_ratio = source_len / len_diff
+            else:
+                diff_ratio = 0
+
+            if diff_ratio >= 0.1:
+                assms = df["target"].tolist()
+                # assms.append(rep)
+            else:
+                assms = []
+        else:
+            if "aln_frac" in df.columns:
+                if is_unique(df["aln_frac"]):
+                    df["z_score_aln"] = 0
+                else:
+                    df["z_score_aln"] = stats.zscore(df["aln_frac"])
+
+            if is_unique(df["len_diff"]):
+                df["z_score_diff"] = 0
+            else:
+                df["z_score_diff"] = stats.zscore(df["len_diff"])
+
+            if "aln_frac" in df.columns:
+                df = df[
+                    (df["z_score_aln"].abs() >= threshold)
+                    | (df["z_score_diff"].abs() >= threshold)
+                ]
+            else:
+                df = df[(df["z_score_diff"].abs() >= threshold)]
+
+            assms = df["target"].tolist()
+
+        if df.empty:
+            return []
+        else:
+            return assms
 
 
 # From https://github.com/GiulioRossetti/cdlib/blob/master/cdlib/utils.py#L79
@@ -434,8 +620,11 @@ def create_graph(pairwise_distances):
     for u, v, data in M.edges(data=True):
         if not G.has_edge(u, v):
             # set weight to 1 if no weight is given for edge in M
+            weight_raw = mean(
+                d.get("weight_raw", 0) for d in M.get_edge_data(u, v).values()
+            )
             weight = mean(d.get("weight", 0) for d in M.get_edge_data(u, v).values())
-            G.add_edge(u, v, weight=weight)
+            G.add_edge(u, v, weight=weight, weight_raw=weight_raw)
     # Remove self loops
     G.remove_edges_from(list(nx.selfloop_edges(G)))
     # Identify isolated nodes
@@ -594,7 +783,7 @@ def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold
 
     if len(missing) > 0:
         log.debug(
-            "Missing {:,} assemblies in the fastANI comparison, Assemblies too divergent".format(
+            "Missing {:,} assemblies in the MASH comparison, Assemblies too divergent".format(
                 len(missing)
             )
         )
@@ -632,18 +821,26 @@ def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold
     reps, subgraphs = get_reps(graph=G_filt, partition=partition)
     derep_assemblies = []
     for i in range(len(reps)):
-        candidates = refine_candidates(
-            rep=reps[i],
-            subgraph=subgraphs[i],
-            threshold=threshold,
-            pw=mash_dist,
+        # candidates = refine_candidates(
+        #     rep=reps[i],
+        #     subgraph=subgraphs[i],
+        #     threshold=threshold,
+        #     pw=mash_dist,
+        # )
+        can = representative(
+            name=reps[i], graph=subgraphs[i], threshold=threshold, pw=mash_dist
         )
+
+        candidates = [can.name] + can.selected
+
         if len(candidates) > 1:
             for candidate in candidates:
                 derep_assemblies.append(candidate)
         else:
             derep_assemblies = candidates
-    derep_assemblies = list(set(derep_assemblies + reps + missing + isolated))
+
+    derep_assemblies = derep_assemblies + reps + missing + isolated
+    derep_assemblies = list(set(derep_assemblies))
     reps = reps + missing + isolated
 
     if len(reps) > len(derep_assemblies):
@@ -709,7 +906,7 @@ def dereplicate_ANI(
             if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")
                 failed = "Assemblies too short"
-                return None, None, failed
+                return None, None, failed, None
 
             ani_results = pairwise_fastANI(
                 assemblies=all_assemblies_tmp["assembly"].tolist(),
@@ -738,7 +935,7 @@ def dereplicate_ANI(
             if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")
                 failed = "Assemblies too short"
-                return None, None, failed
+                return None, None, failed, None
 
             # save chunks to disk
             files, wdir = save_chunks_to_disk(chunks, temp_dir)
@@ -759,7 +956,7 @@ def dereplicate_ANI(
         if pw["failed"]:
             log.debug("Failed. Reason: Assemblies too divergent")
             failed = "Assemblies too divergent"
-            return None, None, failed
+            return None, None, failed, None
 
         missing = pw["missing"]
 
@@ -794,7 +991,8 @@ def dereplicate_ANI(
                 ],
                 columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
             )
-            return all_assemblies_tmp, results, failed
+
+            return all_assemblies_tmp, results, failed, None
 
         # TODO: streamline this
         G_filt, w_filt = filter_graph(G)
@@ -818,19 +1016,74 @@ def dereplicate_ANI(
 
         reps, subgraphs = get_reps(graph=G_filt, partition=partition)
         derep_assemblies = []
+        stats = []
         for i in range(len(reps)):
-            candidates = refine_candidates(
-                rep=reps[i],
-                subgraph=subgraphs[i],
+            # candidates = refine_candidates(
+            #     rep=reps[i],
+            #     subgraph=subgraphs[i],
+            #     threshold=threshold,
+            #     pw=pairwise_distances,
+            # )
+            can = representative(
+                name=reps[i],
+                graph=subgraphs[i],
                 threshold=threshold,
                 pw=pairwise_distances,
             )
+            stats_df = pd.DataFrame(
+                [
+                    (
+                        reps[i],
+                        can.n_nodes,
+                        can.n_nodes_selected,
+                        can.n_nodes_discarded,
+                        can.graph_avg_weight,
+                        can.graph_sd_weight,
+                        can.graph_avg_weight_raw,
+                        can.graph_sd_weight_raw,
+                        can.subgraph_selected_avg_weight,
+                        can.subgraph_selected_sd_weight,
+                        can.subgraph_selected_avg_weight_raw,
+                        can.subgraph_selected_sd_weight_raw,
+                        can.subgraph_discarded_avg_weight,
+                        can.subgraph_discarded_sd_weight,
+                        can.subgraph_discarded_avg_weight_raw,
+                        can.subgraph_discarded_sd_weight_raw,
+                    )
+                ],
+                columns=[
+                    "representative",
+                    "n_nodes",
+                    "n_nodes_selected",
+                    "n_nodes_discarded",
+                    "graph_avg_weight",
+                    "graph_sd_weight",
+                    "graph_avg_weight_raw",
+                    "graph_sd_weight_raw",
+                    "subgraph_selected_avg_weight",
+                    "subgraph_selected_sd_weight",
+                    "subgraph_selected_avg_weight_raw",
+                    "subgraph_selected_sd_weight_raw",
+                    "subgraph_discarded_avg_weight",
+                    "subgraph_discarded_sd_weight",
+                    "subgraph_discarded_avg_weight_raw",
+                    "subgraph_discarded_sd_weight_raw",
+                ],
+            )
+
+            stats.append(stats_df)
+            candidates = [can.name] + can.selected
+
             if len(candidates) > 1:
                 for candidate in candidates:
                     derep_assemblies.append(candidate)
             else:
                 derep_assemblies = candidates
-    derep_assemblies = list(set(derep_assemblies + reps + missing + isolated))
+    stats = pd.concat(stats)
+    # derep_assemblies = [item for derep_assemblies in t for item in derep_assemblies]
+    derep_assemblies = derep_assemblies + reps + missing + isolated
+
+    derep_assemblies = list(set(derep_assemblies))
     reps = reps + missing + isolated
 
     log.debug(
@@ -871,92 +1124,93 @@ def dereplicate_ANI(
     all_assemblies_tmp.loc[
         all_assemblies_tmp["assembly"].isin(derep_assemblies), "derep"
     ] = 1
-    return all_assemblies_tmp, results, failed
+
+    return all_assemblies_tmp, results, failed, stats
 
 
-def refine_candidates(rep, subgraph, pw, threshold=2.0):
-    results = []
-    len_diff = 0
-    source_len = 0
-    if subgraph.number_of_edges() == 0:
-        return [rep]
-    for reachable_node in nx.all_neighbors(subgraph, rep):
-        if reachable_node != rep:
-            idx = pw["target"] == rep
-            pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
-                idx, ["target", "source", "target_len", "source_len"]
-            ].values
+# def refine_candidates(rep, subgraph, pw, threshold=2.0):
+#     results = []
+#     len_diff = 0
+#     source_len = 0
+#     if subgraph.number_of_edges() == 0:
+#         return [rep]
+#     for reachable_node in nx.all_neighbors(subgraph, rep):
+#         if reachable_node != rep:
+#             idx = pw["target"] == rep
+#             pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
+#                 idx, ["target", "source", "target_len", "source_len"]
+#             ].values
 
-            df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
+#             df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
 
-            # Switch column order
-            # idx = df["target"] == rep
-            # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
-            #     idx, ["target", "source", "target_len", "source_len"]
-            # ].values
+#             # Switch column order
+#             # idx = df["target"] == rep
+#             # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
+#             #     idx, ["target", "source", "target_len", "source_len"]
+#             # ].values
 
-            source_len = mean(df.source_len.values)
-            target_len = mean(df.target_len.values)
-            len_diff = abs(source_len - target_len)
-            weight = mean(df.weight.values)
+#             source_len = mean(df.source_len.values)
+#             target_len = mean(df.target_len.values)
+#             len_diff = abs(source_len - target_len)
+#             weight = mean(df.weight.values)
 
-            if "aln_frac" in df.columns:
-                aln_frac = mean(df.aln_frac.values)
-                results.append(
-                    {
-                        "source": rep,
-                        "target": reachable_node,
-                        "weight": float(weight),
-                        "aln_frac": float(aln_frac),
-                        "len_diff": int(len_diff),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "source": rep,
-                        "target": reachable_node,
-                        "weight": float(weight),
-                        "len_diff": int(len_diff),
-                    }
-                )
-    df = pd.DataFrame(results)
+#             if "aln_frac" in df.columns:
+#                 aln_frac = mean(df.aln_frac.values)
+#                 results.append(
+#                     {
+#                         "source": rep,
+#                         "target": reachable_node,
+#                         "weight": float(weight),
+#                         "aln_frac": float(aln_frac),
+#                         "len_diff": int(len_diff),
+#                     }
+#                 )
+#             else:
+#                 results.append(
+#                     {
+#                         "source": rep,
+#                         "target": reachable_node,
+#                         "weight": float(weight),
+#                         "len_diff": int(len_diff),
+#                     }
+#                 )
+#     df = pd.DataFrame(results)
 
-    if len(df.index) < 2:
-        if len_diff > 0:
-            diff_ratio = source_len / len_diff
-        else:
-            diff_ratio = 0
+#     if len(df.index) < 2:
+#         if len_diff > 0:
+#             diff_ratio = source_len / len_diff
+#         else:
+#             diff_ratio = 0
 
-        if diff_ratio >= 0.1:
-            assms = df["target"].tolist()
-            assms.append(rep)
-        else:
-            assms = [rep]
-    else:
-        if "aln_frac" in df.columns:
-            if is_unique(df["aln_frac"]):
-                df["z_score_aln"] = 0
-            else:
-                df["z_score_aln"] = stats.zscore(df["aln_frac"])
+#         if diff_ratio >= 0.1:
+#             assms = df["target"].tolist()
+#             assms.append(rep)
+#         else:
+#             assms = [rep]
+#     else:
+#         if "aln_frac" in df.columns:
+#             if is_unique(df["aln_frac"]):
+#                 df["z_score_aln"] = 0
+#             else:
+#                 df["z_score_aln"] = stats.zscore(df["aln_frac"])
 
-        if is_unique(df["len_diff"]):
-            df["z_score_diff"] = 0
-        else:
-            df["z_score_diff"] = stats.zscore(df["len_diff"])
+#         if is_unique(df["len_diff"]):
+#             df["z_score_diff"] = 0
+#         else:
+#             df["z_score_diff"] = stats.zscore(df["len_diff"])
 
-        if "aln_frac" in df.columns:
-            df = df[
-                (df["z_score_aln"].abs() >= threshold)
-                | (df["z_score_diff"].abs() >= threshold)
-            ]
-        else:
-            df = df[(df["z_score_diff"].abs() >= threshold)]
+#         if "aln_frac" in df.columns:
+#             df = df[
+#                 (df["z_score_aln"].abs() >= threshold)
+#                 | (df["z_score_diff"].abs() >= threshold)
+#             ]
+#         else:
+#             df = df[(df["z_score_diff"].abs() >= threshold)]
 
-        assms = df["target"].tolist()
-        assms.append(rep)
+#         assms = df["target"].tolist()
+#         assms.append(rep)
 
-    if df.empty:
-        return [rep]
-    else:
-        return assms
+#     if df.empty:
+#         return [rep]
+#     else:
+#         return assms

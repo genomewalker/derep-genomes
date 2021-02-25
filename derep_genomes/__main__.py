@@ -11,6 +11,7 @@ You should have received a copy of the GNU General Public License along with thi
 see <https://www.gnu.org/licenses/>.
 """
 
+from scipy import stats
 from derep_genomes import __version__
 
 import subprocess
@@ -119,7 +120,7 @@ def process_one_taxon(taxon, parms):
                 acc_to_assemblies_mash_d.shape[0]
             )
         )
-        derep_assemblies, results, failed = dereplicate_ANI(
+        derep_assemblies, results, failed, stats_df = dereplicate_ANI(
             all_assemblies=acc_to_assemblies_mash_d,
             threads=threads,
             threshold=threshold,
@@ -144,11 +145,15 @@ def process_one_taxon(taxon, parms):
                 os.path.basename
             )
             results.loc[:, "taxon"] = taxon
+            if stats_df is not None:
+                stats_df.loc[:, "taxon"] = taxon
 
-        return derep_assemblies, results, failed_df
+        return derep_assemblies, results, failed_df, stats_df
 
 
-def insert_to_db(derep_assemblies, results, failed, con, threads, out_dir, copy):
+def insert_to_db(
+    derep_assemblies, results, failed, stats_df, con, threads, out_dir, copy
+):
     if not derep_assemblies.empty:
         query = check_existing(
             df=derep_assemblies.loc[:, ["taxon"]].drop_duplicates(),
@@ -189,6 +194,56 @@ def insert_to_db(derep_assemblies, results, failed, con, threads, out_dir, copy)
             con=con,
         )
         results_db = insert_pd_sql(query=query, table="results", con=con)
+
+    if not stats_df.empty:
+        # Add results to results table
+        query = check_existing(
+            stats_df.loc[
+                :,
+                [
+                    "taxon",
+                    "representative",
+                    "n_nodes",
+                    "n_nodes_selected",
+                    "n_nodes_discarded",
+                    "graph_avg_weight",
+                    "graph_sd_weight",
+                    "graph_avg_weight_raw",
+                    "graph_sd_weight_raw",
+                    "subgraph_selected_avg_weight",
+                    "subgraph_selected_sd_weight",
+                    "subgraph_selected_avg_weight_raw",
+                    "subgraph_selected_sd_weight_raw",
+                    "subgraph_discarded_avg_weight",
+                    "subgraph_discarded_sd_weight",
+                    "subgraph_discarded_avg_weight_raw",
+                    "subgraph_discarded_sd_weight_raw",
+                ],
+            ],
+            columns=[
+                "taxon",
+                "representative",
+                "n_nodes",
+                "n_nodes_selected",
+                "n_nodes_discarded",
+                "graph_avg_weight",
+                "graph_sd_weight",
+                "graph_avg_weight_raw",
+                "graph_sd_weight_raw",
+                "subgraph_selected_avg_weight",
+                "subgraph_selected_sd_weight",
+                "subgraph_selected_avg_weight_raw",
+                "subgraph_selected_sd_weight_raw",
+                "subgraph_discarded_avg_weight",
+                "subgraph_discarded_sd_weight",
+                "subgraph_discarded_avg_weight_raw",
+                "subgraph_discarded_sd_weight_raw",
+            ],
+            table="stats",
+            con=con,
+        )
+
+        stats_db = insert_pd_sql(query=query, table="stats", con=con)
 
     if not derep_assemblies.empty and not results.empty:
         # Add jobs done to table
@@ -375,11 +430,13 @@ def find_assemblies(x, classifications, all_assm):
     res = find_assemblies_for_accessions(accessions=accessions, all_assemblies=all_assm)
     return res
 
-
+#TODO: Improve the matching between filenames and accessions
 def shorten_accession(accession):
     if accession.startswith("GCF_") or accession.startswith("GCA_"):
         accession = accession.split(".")[0]
         assert len(accession) == 13
+    else:
+        accession = accession.split(".")[0]
     return accession
 
 
@@ -464,6 +521,7 @@ def main():
     )
     all_assemblies_df = list(map(get_accession, all_assemblies))
     assm_data = classifications_df.merge(pd.DataFrame(all_assemblies_df))
+
     assm_data.loc[:, "file"] = assm_data["assembly"].apply(os.path.basename)
 
     if args.selected_taxa:
@@ -644,11 +702,16 @@ def main():
                 results = pd.DataFrame()
             else:
                 results = pd.concat([x[1] for x in dfs if not None in dfs])
+            if all(v is None for v in l):
+                stats_df = pd.DataFrame()
+            else:
+                stats_df = pd.concat([x[3] for x in dfs if not None in dfs])
 
             insert_to_db(
                 derep_assemblies=derep_assemblies,
                 results=results,
                 failed=failed,
+                stats_df=stats_df,
                 con=con,
                 threads=args.threads,
                 out_dir=args.out_dir,
@@ -712,11 +775,15 @@ def main():
                 results = pd.DataFrame()
             else:
                 results = pd.concat([x[1] for x in dfs if not None in dfs])
-
+            if all(v is None for v in l):
+                stats_df = pd.DataFrame()
+            else:
+                stats_df = pd.concat([x[3] for x in dfs if not None in dfs])
             insert_to_db(
                 derep_assemblies=derep_assemblies,
                 results=results,
                 failed=failed,
+                stats_df=stats_df,
                 con=con,
                 threads=args.threads,
                 out_dir=args.out_dir,

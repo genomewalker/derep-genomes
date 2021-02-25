@@ -1,7 +1,7 @@
 tqdm==4.50.0
 community==1.0.0b1
 simple_slurm==0.1.5
-pandas==1.1.2
+pandas>1.1.2
 scipy==1.5.2
 networkx==2.5
 cx_Freeze==6.2
