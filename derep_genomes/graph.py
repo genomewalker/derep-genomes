@@ -401,7 +401,7 @@ def is_unique(s):
     return (a[0] == a).all()
 
 
-def estimate_frag_len(all_assemblies):
+def estimate_frag_len(all_assemblies, min_genome_size, ani_fraglen_fraction):
     assm_lens = (
         all_assemblies["assembly"].map(lambda x: get_assembly_length(x)).tolist()
     )
@@ -409,7 +409,10 @@ def estimate_frag_len(all_assemblies):
     if x < 3000:
         frag_len = math.floor(x / 500.0) * 500.0
     else:
-        frag_len = 3000
+        if x > min_genome_size:
+            frag_len = int(ani_fraglen_fraction * x)
+        else:
+            frag_len = 3000
 
     log.debug(
         "Minimum assembly length of {}. fastANI fragment length used: {}".format(
@@ -666,7 +669,15 @@ def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold
 
 
 def dereplicate_ANI(
-    all_assemblies, threads, threshold, chunks, slurm_config, tmp_dir, max_jobs_array
+    all_assemblies,
+    threads,
+    threshold,
+    chunks,
+    slurm_config,
+    tmp_dir,
+    max_jobs_array,
+    min_genome_size,
+    ani_fraglen_fraction,
 ):
     """
     This function dereplicates genomes by Taxon by:
@@ -689,7 +700,11 @@ def dereplicate_ANI(
                 )
             )
 
-            frag_len = estimate_frag_len(all_assemblies_tmp)
+            frag_len = estimate_frag_len(
+                all_assemblies_tmp,
+                min_genome_size,
+                ani_fraglen_fraction,
+            )
 
             if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")
@@ -716,7 +731,9 @@ def dereplicate_ANI(
                 )
             )
 
-            frag_len = estimate_frag_len(all_assemblies_tmp)
+            frag_len = estimate_frag_len(
+                all_assemblies_tmp, min_genome_size, ani_fraglen_fraction
+            )
 
             if frag_len is None:
                 log.debug("Failed. Reason: Assemblies too short")

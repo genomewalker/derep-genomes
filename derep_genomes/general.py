@@ -69,6 +69,9 @@ help_msg = {
     "debug": "Print debug messages",
     "version": "Print program version",
     "mash_threshold": "Mash distance threshold where to filter",
+    "copy": "Copy assembly files to the output folder",
+    "min_genome_size": "Minimum genome size where to apply heuristics to find ANI fragment size",
+    "ani_fraglen_fraction": "Fraction of the genome size used to estimate the ANI used fragment length",
 }
 
 
@@ -180,7 +183,7 @@ def get_arguments(argv=None):
         "--copy",
         action="store_true",
         required="--out-dir" in " ".join(sys.argv),
-        help="Copy assembly files to the output folder",
+        help=help_msg["copy"],
     )
     optional.add_argument(
         "--out-dir",
@@ -189,6 +192,22 @@ def get_arguments(argv=None):
         type=str,
         required="--copy" in " ".join(sys.argv),
         help=help_msg["out_dir"],
+    )
+    optional.add_argument(
+        "--min-genome-size",
+        dest="min_genome_size",
+        metavar="INT",
+        type=int,
+        default=20000000,
+        help=help_msg["min_genome_size"],
+    )
+    optional.add_argument(
+        "--ani-fraglen-fraction",
+        dest="ani_fraglen_fraction",
+        metavar="FLOAT",
+        type=float,
+        default=0.005,
+        help=help_msg["ani_fraglen_fraction"],
     )
     optional.add_argument(
         "--debug", dest="debug", action="store_true", help=help_msg["debug"]

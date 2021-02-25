@@ -70,6 +70,8 @@ def process_one_taxon(taxon, parms):
     tmp_dir = parms["tmp_dir"]
     max_jobs_array = parms["max_jobs_array"]
     mash_threshold = parms["mash_threshold"]
+    ani_fraglen_fraction = parms["ani_fraglen_fraction"]
+    min_genome_size = parms["min_genome_size"]
     failed_df = None
 
     log.debug("Dereplicating {}".format(taxon))
@@ -125,6 +127,8 @@ def process_one_taxon(taxon, parms):
             slurm_config=slurm_config,
             tmp_dir=tmp_dir,
             max_jobs_array=max_jobs_array,
+            min_genome_size=min_genome_size,
+            ani_fraglen_fraction=ani_fraglen_fraction,
         )
         if failed:
             failed_df = acc_to_assemblies.copy()
@@ -594,6 +598,8 @@ def main():
                 "tmp_dir": tmp_dir,
                 "max_jobs_array": args.max_jobs_array,
                 "mash_threshold": args.mash_threshold,
+                "min_genome_size": args.min_genome_size,
+                "ani_fraglen_fraction": args.ani_fraglen_fraction,
             }
 
             if args.threads > 2:
