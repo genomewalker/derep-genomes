@@ -430,7 +430,8 @@ def find_assemblies(x, classifications, all_assm):
     res = find_assemblies_for_accessions(accessions=accessions, all_assemblies=all_assm)
     return res
 
-#TODO: Improve the matching between filenames and accessions
+
+# TODO: Improve the matching between filenames and accessions
 def shorten_accession(accession):
     if accession.startswith("GCF_") or accession.startswith("GCA_"):
         accession = accession.split(".")[0]
@@ -742,6 +743,8 @@ def main():
                 "tmp_dir": tmp_dir,
                 "max_jobs_array": args.max_jobs_array,
                 "mash_threshold": args.mash_threshold,
+                "min_genome_size": args.min_genome_size,
+                "ani_fraglen_fraction": args.ani_fraglen_fraction,
             }
 
             if is_debug():
