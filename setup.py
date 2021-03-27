@@ -7,7 +7,7 @@ requirements = [
     "networkx>=2.5",
     "simple_slurm==0.1.5",
     "tqdm==4.50.0",
-    "PyYAML==5.3.1",
+    "PyYAML>=5.4",
     "leidenalg>=0.8.2",
     "python-igraph>=0.8.3",
 ]
