@@ -15,10 +15,12 @@ from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from os import devnull
 import tqdm
 from derep_genomes import __version__
+import time
 
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
+timestr = time.strftime("%Y%m%d-%H%M%S")
 
 
 def is_debug():
@@ -58,6 +60,7 @@ help_msg = {
     "in_dir": "Directory containing all assemblies",
     "tax_file": "TSV file with the taxonomic information",
     "db": "SQLite3 DB to store the results",
+    "prefix": "Prefix for the file name results. If not assigned it uses Ymd-HMS",
     "tmp": "Temporary directory",
     "threads": "Number of threads (for fastANI)",
     "threshold": "Z-score filtering threshold",
@@ -119,6 +122,14 @@ def get_arguments(argv=None):
         dest="threads",
         default=16,
         help=help_msg["threads"],
+    )
+    optional.add_argument(
+        "--prefix",
+        type=str,
+        default=timestr,
+        metavar="PREFIX",
+        dest="prefix",
+        help=help_msg["prefix"],
     )
     optional.add_argument(
         "--tmp",

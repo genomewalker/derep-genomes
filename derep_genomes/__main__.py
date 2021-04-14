@@ -55,11 +55,9 @@ from multiprocessing import Pool
 import tqdm
 from functools import partial
 import pandas as pd
-import time
 import tempfile
 
 log = logging.getLogger("my_logger")
-timestr = time.strftime("%Y%m%d-%H%M%S")
 
 
 def process_one_taxon(taxon, parms):
@@ -482,6 +480,7 @@ def main():
     logging.getLogger("my_logger").setLevel(
         logging.DEBUG if args.debug else logging.INFO
     )
+    prefix = args.prefix
 
     if args.copy:
         out_dir = pathlib.Path(args.out_dir).absolute()
@@ -575,7 +574,7 @@ def main():
                         )
                     )
 
-            rfname = timestr + "-derep-genomes_removed-db-entries.tsv"
+            rfname = prefix + "-derep-genomes_removed-db-entries.tsv"
             removed.to_csv(rfname, index=False, sep="\t")
 
     else:
@@ -805,7 +804,7 @@ def main():
             genomes_derep = retrieve_all_genomes_derep(con)
 
             jobs_done = jobs_done.merge(genomes_derep)
-            fname = timestr + "-derep-genomes_results.tsv"
+            fname = prefix + "-derep-genomes_results.tsv"
             logging.info("Saving results to {}".format(fname))
             jobs_done.loc[:, "src"] = jobs_done["file"].apply(
                 lambda x: os.path.join(in_dir, x)
