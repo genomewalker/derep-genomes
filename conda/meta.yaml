@@ -22,12 +22,12 @@ requirements:
     - numpy>=1.17.5
     - pandas>=1.1.2
     - scipy>=1.5.2
-    - dataclasses>=3.10
+    - dataclasses
     - networkx>=2.5
     - tqdm==4.50.0
     - PyYAML==5.3.1
     - fastANI>=1.32
-    - simple-slurm>=0.2.2
+    - simple-slurm
     - leidenalg>=0.8.2
     - python-igraph>=0.8.3
     - mash>=2.2.2
