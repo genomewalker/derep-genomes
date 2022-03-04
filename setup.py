@@ -5,7 +5,7 @@ requirements = [
     "pandas>=1.1.2",
     "scipy>=1.5.2",
     "networkx>=2.5",
-    "simple_slurm==0.1.5",
+    "simple-slurm>=0.2.2",
     "tqdm==4.50.0",
     "PyYAML>=5.4",
     "leidenalg>=0.8.2",
