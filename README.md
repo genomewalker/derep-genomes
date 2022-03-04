@@ -39,7 +39,7 @@ conda install -c conda-forge -c bioconda -c genomewalker derep-genomes
 Using pip
 
 ```bash
-pip install git+ssh://git@github.com/genomewalker/derep-genomes.git@dev
+pip install git+ssh://git@github.com/genomewalker/derep-genomes.git
 ```
 
 By cloning in a dedicated conda environment
