@@ -731,6 +731,18 @@ def main():
                         len(taxons), assm_max
                     )
                 )
+                parms_large = {
+                    "classification": classification_large,
+                    "threads": args.threads,
+                    "threshold": args.threshold,
+                    "chunks": args.chunks,
+                    "slurm_config": args.slurm_config.name,
+                    "tmp_dir": tmp_dir,
+                    "max_jobs_array": args.max_jobs_array,
+                    "mash_threshold": args.mash_threshold,
+                    "min_genome_size": args.min_genome_size,
+                    "ani_fraglen_fraction": args.ani_fraglen_fraction,
+                }
             else:
                 log.info(
                     "Dereplicating {:,} taxa with more than 5 assemblies using {} threads".format(
@@ -738,18 +750,18 @@ def main():
                     )
                 )
                 log.warning("This can take a long time!!!")
-            parms_large = {
-                "classification": classification_large,
-                "threads": args.threads,
-                "threshold": args.threshold,
-                "chunks": args.chunks,
-                "slurm_config": args.slurm_config.name,
-                "tmp_dir": tmp_dir,
-                "max_jobs_array": args.max_jobs_array,
-                "mash_threshold": args.mash_threshold,
-                "min_genome_size": args.min_genome_size,
-                "ani_fraglen_fraction": args.ani_fraglen_fraction,
-            }
+                parms_large = {
+                    "classification": classification_large,
+                    "threads": args.threads,
+                    "threshold": args.threshold,
+                    "chunks": args.chunks,
+                    "slurm_config": None,
+                    "tmp_dir": tmp_dir,
+                    "max_jobs_array": args.max_jobs_array,
+                    "mash_threshold": args.mash_threshold,
+                    "min_genome_size": args.min_genome_size,
+                    "ani_fraglen_fraction": args.ani_fraglen_fraction,
+                }
 
             if is_debug():
                 dfs = list(
