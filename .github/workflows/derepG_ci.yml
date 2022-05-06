@@ -2,17 +2,16 @@ name: derepG_ci
 
 on: [push, pull_request]
 
-
 jobs:
   derepG_ci:
     name: derepG_ci
-    runs-on: 'ubuntu-latest'
+    runs-on: "ubuntu-latest"
     if: "!contains(github.event.head_commit.message, '[skip_ci]')"
     steps:
       - uses: actions/checkout@v2
       - uses: conda-incubator/setup-miniconda@v2
         with:
-          python-version: 3.7
+          python-version: 3.9
           mamba-version: "*"
           channels: conda-forge,bioconda,defaults
           channel-priority: true
