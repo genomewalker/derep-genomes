@@ -466,6 +466,15 @@ def check_done_apply(df, parms):
     return is_done
 
 
+def command_exists(command):
+    try:
+        fnull = open(os.devnull, "w")
+        subprocess.call([command], stdout=fnull, stderr=subprocess.STDOUT)
+        return True
+    except OSError:
+        return False
+
+
 def mute():
     sys.stdout = open(os.devnull, "w")
 
@@ -481,6 +490,15 @@ def main():
         logging.DEBUG if args.debug else logging.INFO
     )
     prefix = args.prefix
+
+    # test if binaries for fastani and mash exists
+    # check if command exists
+    if not command_exists("fastANI"):
+        log.error("fastANI not found in PATH")
+        sys.exit(1)
+    if not command_exists("mash"):
+        log.error("mash not found in PATH")
+        sys.exit(1)
 
     if args.copy:
         out_dir = pathlib.Path(args.out_dir).absolute()
