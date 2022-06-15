@@ -726,10 +726,12 @@ def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
     # mash_out = subprocess.run(mash_command, stdout=subprocess.PIPE).stdout.decode()
     log.debug("Running MASH")
     with open(mash_fout, "w") as fname:
-        subprocess.run(mash_command, stdout=fname, stderr=subprocess.STDOUT)
+        subprocess.run(mash_command, stdout=fname, stderr=subprocess.DEVNULL)
 
     log.debug("Reading MASH results")
-    mash_out = pd.read_csv(mash_fout, sep="\t", usecols=range(0, 3), header=None)
+    mash_out = pd.read_csv(
+        mash_fout, sep="\t", usecols=range(0, 3), header=None, on_bad_lines="skip"
+    )
     mash_out.columns = ["source", "target", "weight"]
     mash_out.loc[:, "weight"] = 1 - mash_out["weight"]
     log.debug("Extracting comparisons with MASH distance >= {}".format(mash_threshold))

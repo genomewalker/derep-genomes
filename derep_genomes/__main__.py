@@ -466,6 +466,15 @@ def check_done_apply(df, parms):
     return is_done
 
 
+def command_exists(command):
+    try:
+        fnull = open(os.devnull, "w")
+        subprocess.call([command], stdout=fnull, stderr=subprocess.STDOUT)
+        return True
+    except OSError:
+        return False
+
+
 def mute():
     sys.stdout = open(os.devnull, "w")
 
@@ -481,6 +490,15 @@ def main():
         logging.DEBUG if args.debug else logging.INFO
     )
     prefix = args.prefix
+
+    # test if binaries for fastani and mash exists
+    # check if command exists
+    if not command_exists("fastANI"):
+        log.error("fastANI not found in PATH")
+        sys.exit(1)
+    if not command_exists("mash"):
+        log.error("mash not found in PATH")
+        sys.exit(1)
 
     if args.copy:
         out_dir = pathlib.Path(args.out_dir).absolute()
@@ -731,6 +749,18 @@ def main():
                         len(taxons), assm_max
                     )
                 )
+                parms_large = {
+                    "classification": classification_large,
+                    "threads": args.threads,
+                    "threshold": args.threshold,
+                    "chunks": args.chunks,
+                    "slurm_config": args.slurm_config.name,
+                    "tmp_dir": tmp_dir,
+                    "max_jobs_array": args.max_jobs_array,
+                    "mash_threshold": args.mash_threshold,
+                    "min_genome_size": args.min_genome_size,
+                    "ani_fraglen_fraction": args.ani_fraglen_fraction,
+                }
             else:
                 log.info(
                     "Dereplicating {:,} taxa with more than 5 assemblies using {} threads".format(
@@ -738,18 +768,18 @@ def main():
                     )
                 )
                 log.warning("This can take a long time!!!")
-            parms_large = {
-                "classification": classification_large,
-                "threads": args.threads,
-                "threshold": args.threshold,
-                "chunks": args.chunks,
-                "slurm_config": args.slurm_config.name,
-                "tmp_dir": tmp_dir,
-                "max_jobs_array": args.max_jobs_array,
-                "mash_threshold": args.mash_threshold,
-                "min_genome_size": args.min_genome_size,
-                "ani_fraglen_fraction": args.ani_fraglen_fraction,
-            }
+                parms_large = {
+                    "classification": classification_large,
+                    "threads": args.threads,
+                    "threshold": args.threshold,
+                    "chunks": args.chunks,
+                    "slurm_config": None,
+                    "tmp_dir": tmp_dir,
+                    "max_jobs_array": args.max_jobs_array,
+                    "mash_threshold": args.mash_threshold,
+                    "min_genome_size": args.min_genome_size,
+                    "ani_fraglen_fraction": args.ani_fraglen_fraction,
+                }
 
             if is_debug():
                 dfs = list(
