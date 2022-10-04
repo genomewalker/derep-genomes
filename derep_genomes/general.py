@@ -75,6 +75,7 @@ help_msg = {
     "copy": "Copy assembly files to the output folder",
     "min_genome_size": "Minimum genome size where to apply heuristics to find ANI fragment size",
     "ani_fraglen_fraction": "Fraction of the genome size used to estimate the ANI used fragment length",
+    "assm_max": "Maximum number of assemblies to process for small batches",
 }
 
 
@@ -155,6 +156,14 @@ def get_arguments(argv=None):
         default=0.01,
         help=help_msg["mash_threshold"],
         dest="mash_threshold",
+    )
+    optional.add_argument(
+        "--max-assemblies",
+        type=int,
+        metavar="INT",
+        dest="assm_max",
+        default=10,
+        help=help_msg["assm_max"],
     )
     slurm.add_argument(
         "--slurm-config",

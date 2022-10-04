@@ -601,7 +601,7 @@ def main():
 
     if not to_do.empty:
         assm_min = 2
-        assm_max = 10
+        assm_max = args.assm_max
 
         # log.info("Calculating assembly lengths")
 
@@ -763,8 +763,8 @@ def main():
                 }
             else:
                 log.info(
-                    "Dereplicating {:,} taxa with more than 5 assemblies using {} threads".format(
-                        len(taxons), args.threads
+                    "Dereplicating {:,} taxa with more than {} assemblies using {} threads".format(
+                        len(taxons), args.assm_max, args.threads
                     )
                 )
                 log.warning("This can take a long time!!!")
