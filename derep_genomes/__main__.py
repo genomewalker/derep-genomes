@@ -435,7 +435,7 @@ def shorten_accession(accession):
         accession = accession.split(".")[0]
         assert len(accession) == 13
     else:
-        accession = accession.split(".")[0]
+        accession = accession
     return accession
 
 
