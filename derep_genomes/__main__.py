@@ -75,6 +75,10 @@ def process_one_taxon(taxon, parms):
     failed_df = None
     dashing = parms["dashing"]
     assm_max = parms["assm_max"]
+    con = parms["con"]
+    threads = parms["threads"]
+    out_dir = parms["out_dir"]
+    copy = parms["copy"]
 
     log.debug("Dereplicating {}".format(taxon))
     classification = classification[classification["taxonomy"] == taxon]
@@ -151,19 +155,34 @@ def process_one_taxon(taxon, parms):
             ani_fraglen_fraction=ani_fraglen_fraction,
             assm_max=assm_max,
         )
-        if failed:
+
+        if failed is not None:
             failed_df = acc_to_assemblies.copy()
             failed_df.loc[:, "file"] = failed_df["file"]
             failed_df.loc[:, "taxonomy"] = taxon
             failed_df.loc[:, "reason"] = failed
             failed_df = failed_df[["taxonomy", "accession", "file", "reason"]]
         else:
+            failed_df = pd.DataFrame()
             # Add taxa to taxa table
             derep_assemblies = concat_df([derep_assemblies, acc_to_assemblies_xash_o])
             derep_assemblies.loc[:, "taxonomy"] = taxon
             results.loc[:, "taxonomy"] = taxon
             if stats_df is not None:
                 stats_df.loc[:, "taxonomy"] = taxon
+            else:
+                stats_df = pd.DataFrame()
+
+        insert_to_db(
+            derep_assemblies=derep_assemblies,
+            results=results,
+            failed=failed_df,
+            stats_df=stats_df,
+            con=con,
+            threads=threads,
+            out_dir=out_dir,
+            copy=copy,
+        )
 
         return derep_assemblies, results, failed_df, stats_df
 
@@ -286,7 +305,7 @@ def insert_to_db(
             table="jobs_failed",
             con=con,
         )
-        jobs_failed = insert_pd_sql(query=query, table="jobs_failed", con=con)
+        insert_pd_sql(query=query, table="jobs_failed", con=con)
 
         query = check_existing(
             df=failed.loc[:, ["taxonomy"]].drop_duplicates(),
@@ -302,46 +321,12 @@ def insert_to_db(
             table="jobs_done",
             con=con,
         )
-        jobs_failed = insert_pd_sql(query=query, table="jobs_done", con=con)
+        insert_pd_sql(query=query, table="jobs_done", con=con)
 
     try:
         con.commit()
     except:
-        pass
-    if copy:
-        files = pd.DataFrame()
-        files.loc[:, "src"] = derep_assemblies[derep_assemblies["derep"] == 1].loc[
-            :, "file"
-        ]
-        files.loc[:, "dst"] = out_dir
-        files = list(files.itertuples(index=False, name=None))
-        log.info(
-            "Copying dereplicated {:,} assemblies to output directory".format(
-                len(files)
-            )
-        )
-
-        if is_debug():
-            files = list(map(copy_files, files))
-        else:
-            p = Pool(threads)
-            files = list(
-                tqdm(
-                    p.imap_unordered(copy_files, files),
-                    total=len(files),
-                    leave=False,
-                    ncols=80,
-                )
-            )
-        p.close()
-        p.join()
-        log.info(
-            "Dereplication complete. Jobs saved to DB and files copied to {}\n".format(
-                out_dir
-            )
-        )
-        return
-    log.info("Dereplication complete. Jobs saved to DB\n")
+        con.rollback()
 
 
 def copy_files(src_dst):
@@ -424,32 +409,6 @@ def process_sigletons(singletons, out_dir, threads, con, copy):
         con.commit()
     except:
         pass
-
-    if copy:
-        log.info(
-            "Copying {} files with singletons to {}\n".format(
-                singletons.shape[0], out_dir
-            )
-        )
-        files = pd.DataFrame()
-        files.loc[:, "src"] = singletons.loc[:, "file"]
-        files.loc[:, "dst"] = out_dir
-        files = list(files.itertuples(index=False, name=None))
-
-        if is_debug():
-            files = list(map(copy_files, files))
-        else:
-            p = Pool(threads)
-            files = list(
-                tqdm(
-                    p.imap_unordered(copy_files, files),
-                    total=len(files),
-                    leave=False,
-                    ncols=80,
-                )
-            )
-            p.close()
-            p.join()
 
 
 def find_assemblies(x, classifications, all_assm):
@@ -660,20 +619,6 @@ def main():
         assm_min = 2
         assm_max = args.assm_max
 
-        # log.info("Calculating assembly lengths")
-
-        # p = Pool(args.threads)
-        # to_do.loc[:, "len"] = list(
-        #     tqdm.tqdm(
-        #         p.imap(get_assembly_length, to_do["assembly"].to_list()),
-        #         total=to_do.shape[0],
-        #         leave=False,
-        #         ncols=80,
-        #     )
-        # )
-        # print(to_do)
-        # exit(0)
-
         log.info("Splitting taxa in between singleton and non-singleton taxa")
 
         taxon_counts = to_do.groupby("taxonomy", as_index=False)["taxonomy"].agg(
@@ -704,89 +649,8 @@ def main():
                 con=con,
                 copy=args.copy,
             )
-        # else:
-        #     log.info("No singletons found\n")
-
-        # if not classification_small.empty:
-        #     taxons = list(set(classification_small["taxonomy"]))
-
-        #     parms = {
-        #         "classification": classification_small,
-        #         "threads": args.threads,
-        #         "threshold": args.threshold,
-        #         "chunks": args.chunks,
-        #         "slurm_config": None,
-        #         "tmp_dir": tmp_dir,
-        #         "max_jobs_array": args.max_jobs_array,
-        #         "xash_threshold": args.xash_threshold,
-        #         "min_genome_size": args.min_genome_size,
-        #         "ani_fraglen_fraction": args.ani_fraglen_fraction,
-        #         "dashing": args.dashing,
-        #     }
-
-        #     if args.threads > 2:
-        #         nworkers = round(args.threads / 2)
-        #     else:
-        #         nworkers = 1
-        #     log.info(
-        #         "Dereplicating {:,} taxa with {} to {} assemblies using {} workers".format(
-        #             len(taxons), assm_min, assm_max, nworkers
-        #         )
-        #     )
-
-        #     if is_debug():
-        #         dfs = list(map(partial(process_one_taxon, parms=parms), taxons))
-        #     else:
-        #         # p = Pool(args.threads)
-        #         dfs = list(
-        #             tqdm(
-        #                 map(partial(process_one_taxon, parms=parms), taxons),
-        #                 total=len(taxons),
-        #                 leave=False,
-        #                 ncols=80,
-        #             )
-        #         )
-        #     # p.close()
-        #     # p.join()
-        #     # TODO: clean this mess
-        #     # remove empty lists
-        #     l = [x[2] for x in dfs if None not in dfs]
-        #     if all(v is None for v in l):
-        #         failed = pd.DataFrame()
-        #     else:
-        #         failed = pd.concat([x[2] for x in dfs if None not in dfs])
-
-        #     l = [x[0] for x in dfs if None not in dfs]
-
-        #     if all(v is None for v in l):
-        #         derep_assemblies = pd.DataFrame()
-        #     else:
-        #         derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
-
-        #     l = [x[1] for x in dfs if None not in dfs]
-
-        #     if all(v is None for v in l):
-        #         results = pd.DataFrame()
-        #     else:
-        #         results = pd.concat([x[1] for x in dfs if None not in dfs])
-
-        #     l = [x[3] for x in dfs if None not in dfs]
-
-        #     if all(v is None for v in l):
-        #         stats_df = pd.DataFrame()
-        #     else:
-        #         stats_df = pd.concat([x[3] for x in dfs if None not in dfs])
-
-        #     insert_to_db(
-        #         derep_assemblies=derep_assemblies,
-        #         results=results,
-        #         failed=failed,
-        #         stats_df=stats_df,
-        #         con=con,
-        #         threads=args.threads,
-        #         out_dir=args.out_dir,
-        #         copy=args.copy,
-        #     )
+        else:
+            log.info("No singletons found\n")
 
         if not classification_large.empty:
             taxons = list(set(classification_large["taxonomy"]))
@@ -809,6 +673,9 @@ def main():
                     "ani_fraglen_fraction": args.ani_fraglen_fraction,
                     "dashing": args.dashing,
                     "assm_max": assm_max,
+                    "out_dir": args.out_dir,
+                    "con": con,
+                    "copy": args.copy,
                 }
             else:
                 log.info(
@@ -830,6 +697,9 @@ def main():
                     "ani_fraglen_fraction": args.ani_fraglen_fraction,
                     "dashing": args.dashing,
                     "assm_max": args.assm_max,
+                    "out_dir": args.out_dir,
+                    "con": con,
+                    "copy": args.copy,
                 }
 
             if is_debug():
@@ -846,38 +716,6 @@ def main():
                     )
                 )
 
-            l = [x[2] for x in dfs if None not in dfs]
-            if all(v is None for v in l):
-                failed = pd.DataFrame()
-            else:
-                failed = pd.concat([x[2] for x in dfs if None not in dfs])
-
-            l = [x[0] for x in dfs if None not in dfs]
-            if all(v is None for v in l):
-                derep_assemblies = pd.DataFrame()
-            else:
-                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
-
-            l = [x[1] for x in dfs if None not in dfs]
-            if all(v is None for v in l):
-                results = pd.DataFrame()
-            else:
-                results = pd.concat([x[1] for x in dfs if None not in dfs])
-            l = [x[3] for x in dfs if None not in dfs]
-            if all(v is None for v in l):
-                stats_df = pd.DataFrame()
-            else:
-                stats_df = pd.concat([x[3] for x in dfs if None not in dfs])
-            insert_to_db(
-                derep_assemblies=derep_assemblies,
-                results=results,
-                failed=failed,
-                stats_df=stats_df,
-                con=con,
-                threads=args.threads,
-                out_dir=args.out_dir,
-                copy=args.copy,
-            )
         jobs_done = retrieve_all_jobs_done(con)
         jobs_failed = retrieve_all_jobs_failed(con)
         genomes_derep = retrieve_all_genomes_derep(con)
@@ -889,7 +727,6 @@ def main():
         if not jobs_done.empty and not genomes_derep.empty:
             jobs_done = retrieve_all_jobs_done(con)
             genomes_derep = retrieve_all_genomes_derep(con)
-
             jobs_done = jobs_done.merge(genomes_derep)
             fname = prefix + "-derep-genomes_results.tsv"
             logging.info("Saving results to {}".format(fname))
@@ -897,13 +734,48 @@ def main():
             if not args.copy:
                 jobs_done.loc[:, "dst"] = ""
             else:
-                jobs_done.loc[:, "dst"] = jobs_done["file"]
+                jobs_done.loc[:, "dst"] = jobs_done["file"].apply(
+                    lambda x: os.path.join(pathlib.Path(out_dir, pathlib.Path(x).name))
+                )
+
+                files = pd.DataFrame()
+                files.loc[:, "src"] = jobs_done.loc[:, "src"]
+                files.loc[:, "dst"] = jobs_done.loc[:, "dst"]
+                files = list(files.itertuples(index=False, name=None))
+
+                log.info(
+                    "Copying dereplicated {:,} assemblies to output directory".format(
+                        len(files)
+                    )
+                )
+
+                if is_debug():
+                    files = list(map(copy_files, files))
+                else:
+                    p = Pool(args.threads)
+                    files = list(
+                        tqdm(
+                            p.imap_unordered(copy_files, files),
+                            total=len(files),
+                            leave=False,
+                            ncols=80,
+                        )
+                    )
+                p.close()
+                p.join()
+                log.info(
+                    "Dereplication complete. Jobs saved to DB and files copied to {}\n".format(
+                        out_dir
+                    )
+                )
+
             jobs_done["representative"] = jobs_done["representative"].astype(bool)
             jobs_done[["taxonomy", "accession", "representative", "src", "dst"]].to_csv(
                 fname, index=False, sep="\t"
             )
     else:
         logging.info("Didn't find any new assemblies to process")
+
     con.close()
 
 

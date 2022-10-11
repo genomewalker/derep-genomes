@@ -94,12 +94,15 @@ class representative:
             weights.append(d["weight"])
             weights_raw.append(d["weight_raw"])
         # if len(list(g.edges)) > 1:
-        mean_weight = mean(weights)
-        mean_weight_raw = mean(weights_raw)
+
         if len(list(g.edges)) > 1:
+            mean_weight = mean(weights)
+            mean_weight_raw = mean(weights_raw)
             sd_weight = stdev(weights)
             sd_weight_raw = stdev(weights_raw)
         else:
+            mean_weight = None
+            mean_weight_raw = None
             sd_weight = None
             sd_weight_raw = None
 
@@ -112,8 +115,6 @@ class representative:
         return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
 
     def get_subgraph_selected(self, g, nodes):
-        weights = []
-        weights_raw = []
         subgraph = nx.subgraph(g, nodes)
         mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
             g=subgraph
@@ -121,8 +122,6 @@ class representative:
         return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
 
     def get_subgraph_discarded(self, g, nodes):
-        weights = []
-        weights_raw = []
         subgraph = nx.subgraph(g, nodes)
         mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
             g=subgraph
@@ -138,28 +137,10 @@ class representative:
             return [rep]
         for reachable_node in nx.all_neighbors(subgraph, rep):
             if reachable_node != rep:
-
-                # idx = pw["target"] == rep
-                # pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
-                #     idx, ["target", "source", "target_len", "source_len"]
-                # ].values
-
-                # df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
-
-                # Switch column order
-                # idx = df["target"] == rep
-                # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
-                #     idx, ["target", "source", "target_len", "source_len"]
-                # ].values
-
-                # source_len = mean(df.source_len.values)
-                # target_len = mean(df.target_len.values)
-                # len_diff = abs(source_len - target_len)
-                # weight = mean(df.weight.values)
                 source_len = subgraph.nodes[rep]["genome_len"]
                 target_len = subgraph.nodes[reachable_node]["genome_len"]
                 len_diff = abs(source_len - target_len)
-                weight = subgraph[rep][reachable_node]["weight"]
+                weight = subgraph[rep][reachable_node]["weight_raw"]
 
                 if "aln_frac" in subgraph[rep][reachable_node]:
                     aln_frac = subgraph[rep][reachable_node]["aln_frac"]
@@ -206,13 +187,38 @@ class representative:
             else:
                 df["z_score_diff"] = stats.zscore(df["len_diff"])
 
-            if "aln_frac" in df.columns:
+            if is_unique(df["weight"]):
+                df["z_score_weight"] = 0
+            else:
+                df["z_score_weight"] = stats.zscore(df["weight"])
+
+            if set(["aln_frac", "len_diff", "weight"]).issubset(df.columns):
+                df = df[
+                    (df["z_score_aln"].abs() >= threshold)
+                    | (df["z_score_diff"].abs() >= threshold)
+                    | (df["z_score_weight"].abs() >= threshold)
+                ]
+            elif set(["aln_frac", "len_diff"]).issubset(df.columns):
                 df = df[
                     (df["z_score_aln"].abs() >= threshold)
                     | (df["z_score_diff"].abs() >= threshold)
                 ]
-            else:
+            elif set(["aln_frac", "weight"]).issubset(df.columns):
+                df = df[
+                    (df["z_score_aln"].abs() >= threshold)
+                    | (df["z_score_weight"].abs() >= threshold)
+                ]
+            elif set(["len_diff", "weight"]).issubset(df.columns):
+                df = df[
+                    (df["z_score_diff"].abs() >= threshold)
+                    | (df["z_score_weight"].abs() >= threshold)
+                ]
+            elif "aln_frac" in df.columns:
+                df = df[(df["z_score_aln"].abs() >= threshold)]
+            elif "len_diff" in df.columns:
                 df = df[(df["z_score_diff"].abs() >= threshold)]
+            elif "weight" in df.columns:
+                df = df[(df["z_score_weight"].abs() >= threshold)]
 
             assms = df["target"].tolist()
 
@@ -304,9 +310,7 @@ def process_fastANI_results(rfile):
 
 
 def generate_ANI_pairwise(df):
-    # remove self comparisons
     df = df.copy()
-    # df = df[df["source"] != df["target"]]
     if df.empty:
         return None
     else:
@@ -702,11 +706,6 @@ def concat_df(frames):
 
 
 def reduce_slurm_jobs(ofiles, threads):
-    # if is_debug():
-    #     dfs = list(
-    #         map(process_fastANI_results, ofiles),
-    #     )
-    # else:
     p = Pool(threads)
     dfs = list(
         p.imap(process_fastANI_results, ofiles),
@@ -747,7 +746,8 @@ def estimate_frag_len(all_assemblies, min_genome_size, ani_fraglen_fraction):
 
 def create_graph(pairwise_distances):
     log.debug("Creating graph step1..")
-    pairwise_distances["weight_raw"] = pairwise_distances["weight"]
+    if "weight_raw" not in pairwise_distances:
+        pairwise_distances["weight_raw"] = pairwise_distances["weight"]
     G = nx.from_pandas_edgelist(
         pairwise_distances, edge_attr=True, create_using=nx.Graph()
     )
@@ -760,21 +760,7 @@ def create_graph(pairwise_distances):
     node_attr = df.set_index("node").to_dict("index")
     nx.set_node_attributes(G, node_attr)
 
-    # log.debug("Creating graph step2..")
-    # G = nx.Graph()
-    log.debug("Creating graph step3..")
-
-    # for u, v, data in M.edges(data=True):
-    #     if not G.has_edge(u, v):
-    #         # set weight to 1 if no weight is given for edge in M
-    #         weight_raw = mean(
-    #             d.get("weight_raw", 0) for d in M.get_edge_data(u, v).values()
-    #         )
-    #         weight = mean(d.get("weight", 0) for d in M.get_edge_data(u, v).values())
-    #         G.add_edge(u, v, weight=weight, weight_raw=weight_raw)
-    # Remove self loops
-
-    log.debug("Creating graph step4...")
+    log.debug("Creating graph step2...")
     G.remove_edges_from(list(nx.selfloop_edges(G)))
     # Identify isolated nodes
     isolated = list(nx.isolates(G))
@@ -954,10 +940,6 @@ def run_dashing(fname, threads, dashing_threshold, temp_dir):
     )
     dashing_out = dashing_out[dashing_out["weight"] >= dashing_threshold]
     log.debug("Calculating genome lengths...")
-
-    # df = pd.DataFrame(mash_out, columns=["source", "target", "weight"])
-    # df["weight"] = df["weight"].astype(float)
-    # df["weight"] = df["weight"].apply(lambda x: 1.0 - x)
 
     df_source = dashing_out.source.drop_duplicates().reset_index(drop=True)
     df_target = dashing_out.target.drop_duplicates().reset_index(drop=True)
@@ -1275,6 +1257,7 @@ def dereplicate_ANI(
 
         pairwise_distances = generate_ANI_pairwise(pairwise_distances)
         pw = check_pw(pw=pairwise_distances, assms=all_assemblies_tmp["file"].tolist())
+
         if pw["failed"]:
             log.debug("Failed. Reason: Assemblies too divergent")
             failed = "Assemblies too divergent"
@@ -1296,6 +1279,7 @@ def dereplicate_ANI(
         log.debug("Generating ANI graph")
 
         G, isolated = create_graph(pairwise_distances)
+
         if G.number_of_edges() == 0:
             log.debug("Only self loops found")
             all_assemblies_tmp.loc[:, "representative"] = 1
@@ -1329,7 +1313,7 @@ def dereplicate_ANI(
             )
         )
         log.debug(
-            "Refining genome selection (length difference and fraction aligned, z-score={})".format(
+            "Refining genome selection (length difference, fraction aligned and ANI difference, z-score={})".format(
                 threshold
             )
         )
@@ -1389,91 +1373,3 @@ def dereplicate_ANI(
     ] = 1
 
     return all_assemblies_tmp, results, failed, stats_df
-
-
-# def refine_candidates(rep, subgraph, pw, threshold=2.0):
-#     results = []
-#     len_diff = 0
-#     source_len = 0
-#     if subgraph.number_of_edges() == 0:
-#         return [rep]
-#     for reachable_node in nx.all_neighbors(subgraph, rep):
-#         if reachable_node != rep:
-#             idx = pw["target"] == rep
-#             pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
-#                 idx, ["target", "source", "target_len", "source_len"]
-#             ].values
-
-#             df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
-
-#             # Switch column order
-#             # idx = df["target"] == rep
-#             # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
-#             #     idx, ["target", "source", "target_len", "source_len"]
-#             # ].values
-
-#             source_len = mean(df.source_len.values)
-#             target_len = mean(df.target_len.values)
-#             len_diff = abs(source_len - target_len)
-#             weight = mean(df.weight.values)
-
-#             if "aln_frac" in df.columns:
-#                 aln_frac = mean(df.aln_frac.values)
-#                 results.append(
-#                     {
-#                         "source": rep,
-#                         "target": reachable_node,
-#                         "weight": float(weight),
-#                         "aln_frac": float(aln_frac),
-#                         "len_diff": int(len_diff),
-#                     }
-#                 )
-#             else:
-#                 results.append(
-#                     {
-#                         "source": rep,
-#                         "target": reachable_node,
-#                         "weight": float(weight),
-#                         "len_diff": int(len_diff),
-#                     }
-#                 )
-#     df = pd.DataFrame(results)
-
-#     if len(df.index) < 2:
-#         if len_diff > 0:
-#             diff_ratio = source_len / len_diff
-#         else:
-#             diff_ratio = 0
-
-#         if diff_ratio >= 0.1:
-#             assms = df["target"].tolist()
-#             assms.append(rep)
-#         else:
-#             assms = [rep]
-#     else:
-#         if "aln_frac" in df.columns:
-#             if is_unique(df["aln_frac"]):
-#                 df["z_score_aln"] = 0
-#             else:
-#                 df["z_score_aln"] = stats.zscore(df["aln_frac"])
-
-#         if is_unique(df["len_diff"]):
-#             df["z_score_diff"] = 0
-#         else:
-#             df["z_score_diff"] = stats.zscore(df["len_diff"])
-
-#         if "aln_frac" in df.columns:
-#             df = df[
-#                 (df["z_score_aln"].abs() >= threshold)
-#                 | (df["z_score_diff"].abs() >= threshold)
-#             ]
-#         else:
-#             df = df[(df["z_score_diff"].abs() >= threshold)]
-
-#         assms = df["target"].tolist()
-#         assms.append(rep)
-
-#     if df.empty:
-#         return [rep]
-#     else:
-#         return assms
