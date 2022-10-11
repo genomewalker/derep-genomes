@@ -16,7 +16,8 @@ from os import devnull
 import tqdm
 from derep_genomes import __version__
 import time
-
+from Bio import SeqIO
+from itertools import chain
 
 log = logging.getLogger("my_logger")
 log.setLevel(logging.INFO)
@@ -57,8 +58,7 @@ def is_valid_file(parser, arg, var):
 
 
 help_msg = {
-    "in_dir": "Directory containing all assemblies",
-    "tax_file": "TSV file with the taxonomic information",
+    "tax_file": "TSV file with the genome information",
     "db": "SQLite3 DB to store the results",
     "prefix": "Prefix for the file name results. If not assigned it uses Ymd-HMS",
     "tmp": "Temporary directory",
@@ -71,11 +71,12 @@ help_msg = {
     "out_dir": "Directory where dereplicated assemblies will be copied",
     "debug": "Print debug messages",
     "version": "Print program version",
-    "mash_threshold": "Mash distance threshold where to filter",
+    "xash_threshold": "Mash/Dashing distance threshold where to filter",
     "copy": "Copy assembly files to the output folder",
     "min_genome_size": "Minimum genome size where to apply heuristics to find ANI fragment size",
     "ani_fraglen_fraction": "Fraction of the genome size used to estimate the ANI used fragment length",
     "assm_max": "Maximum number of assemblies to process for small batches",
+    "dashing": "Use Dashing instead of Mash",
 }
 
 
@@ -91,20 +92,11 @@ def get_arguments(argv=None):
     slurm = parser.add_argument_group("SLURM arguments")
 
     required.add_argument(
-        "--in-dir",
-        dest="in_dir",
-        default=argparse.SUPPRESS,
-        required=True,
-        metavar="DIR",
-        type=lambda x: is_valid_file(parser, x, "--in-dir"),
-        help=help_msg["in_dir"],
-    )
-    required.add_argument(
-        "--taxa",
+        "--data",
         required=True,
         metavar="FILE",
         default=argparse.SUPPRESS,
-        type=lambda x: is_valid_file(parser, x, "--taxa"),
+        type=lambda x: is_valid_file(parser, x, "--data"),
         dest="tax_file",
         help=help_msg["tax_file"],
     )
@@ -148,14 +140,14 @@ def get_arguments(argv=None):
         help=help_msg["threshold"],
     )
     optional.add_argument(
-        "--mash-threshold",
+        "--xash-threshold",
         metavar="FLOAT",
         type=lambda x: check_values(
-            x, minval=0, maxval=1, parser=parser, var="--mash-threshold"
+            x, minval=0, maxval=1, parser=parser, var="--xash-threshold"
         ),
         default=0.01,
-        help=help_msg["mash_threshold"],
-        dest="mash_threshold",
+        help=help_msg["xash_threshold"],
+        dest="xash_threshold",
     )
     optional.add_argument(
         "--max-assemblies",
@@ -204,6 +196,11 @@ def get_arguments(argv=None):
         action="store_true",
         required="--out-dir" in " ".join(sys.argv),
         help=help_msg["copy"],
+    )
+    optional.add_argument(
+        "--dashing",
+        action="store_true",
+        help=help_msg["dashing"],
     )
     optional.add_argument(
         "--out-dir",
@@ -361,9 +358,20 @@ def get_assembly_n50(filename):
     return 0
 
 
+# def get_assembly_length(filename):
+#     contig_lengths = sorted(get_contig_lengths(filename), reverse=True)
+#     total_length = sum(contig_lengths)
+#     return total_length
+
+
 def get_assembly_length(filename):
-    contig_lengths = sorted(get_contig_lengths(filename), reverse=True)
-    total_length = sum(contig_lengths)
+    total_length = 0
+    with get_open_func(filename)(filename, "rt") as fasta_file:
+        # add a progress bar
+        for i, record in enumerate(
+            SeqIO.parse(fasta_file, "fasta"),
+        ):
+            total_length += len(record.seq)
     return total_length
 
 
@@ -404,3 +412,12 @@ def applyParallel(dfGrouped, func, threads, parms):
         total=len([group for name, group in dfGrouped]),
     )
     return pd.concat(ret_list)
+
+
+def initializer(init_data):
+    global parms
+    parms = init_data
+
+
+def fast_flatten(input_list):
+    return list(chain.from_iterable(input_list))
