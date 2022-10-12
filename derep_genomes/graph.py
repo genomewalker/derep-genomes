@@ -1,22 +1,16 @@
 import math
 import tempfile
-from statistics import mean, median, stdev
+from statistics import mean, stdev
 import leidenalg
 import networkx as nx
 import igraph as ig
-from networkx.generators.geometric import thresholded_random_geometric_graph
-from numpy.lib.function_base import select
 import pandas as pd
 from scipy import stats
 import subprocess
 import pandas as pd
 from derep_genomes.general import (
-    get_open_func,
     get_assembly_length,
-    get_contig_lengths,
-    get_assembly_n50,
     is_debug,
-    initializer,
 )
 import logging
 from pathlib import Path
@@ -27,7 +21,6 @@ import yaml
 from multiprocessing import Pool
 import tqdm
 import io, sys
-from multiprocessing.pool import ThreadPool
 import numpy as np
 from functools import partial
 import random
@@ -575,7 +568,7 @@ def save_chunks_to_disk(chunks, temp_dir):
     return file_chunks, wdir
 
 
-def create_slurm_commands(files, wdir, frag_len):
+def create_slurm_commands(files, wdir, frag_len, slurm_threads):
     file_list = list(product(files.keys(), files.keys()))
     file_list.sort(key=lambda tup: tup[1])
     odir = os.path.join(wdir, "fastANI_out")
@@ -587,6 +580,8 @@ def create_slurm_commands(files, wdir, frag_len):
         cmd = " ".join(
             [
                 "fastANI",
+                "-t",
+                str(slurm_threads),
                 "--ql",
                 files[file[0]],
                 "--rl",
@@ -749,14 +744,18 @@ def create_graph(pairwise_distances):
     G = nx.from_pandas_edgelist(
         pairwise_distances, edge_attr=True, create_using=nx.Graph()
     )
+    log.debug("Creating graph step1-1..")
+
     source = pairwise_distances[["source", "source_len"]].drop_duplicates()
     source.columns = ["node", "genome_len"]
     target = pairwise_distances[["target", "target_len"]].drop_duplicates()
     target.columns = ["node", "genome_len"]
     df = concat_df([source, target]).drop_duplicates()
+    log.debug("Creating graph step1-2..")
 
     node_attr = df.set_index("node").to_dict("index")
     nx.set_node_attributes(G, node_attr)
+    log.debug("Creating graph step1-3..")
 
     log.debug("Creating graph step2...")
     G.remove_edges_from(list(nx.selfloop_edges(G)))
@@ -1174,6 +1173,7 @@ def dereplicate_ANI(
     threshold,
     chunks,
     slurm_config,
+    slurm_threads,
     tmp_dir,
     max_jobs_array,
     min_genome_size,
@@ -1244,7 +1244,9 @@ def dereplicate_ANI(
             # save chunks to disk
             files, wdir = save_chunks_to_disk(chunks, temp_dir)
             # Create fastANI commands
-            cmds, ofiles, odir = create_slurm_commands(files, wdir, frag_len)
+            cmds, ofiles, odir = create_slurm_commands(
+                files, wdir, frag_len, slurm_threads
+            )
             # Run slurm array job
             pairwise_distances = map_slurm_jobs(
                 cmds, slurm_config, odir, max_jobs_array, temp_dir, threads

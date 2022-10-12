@@ -11,24 +11,14 @@ You should have received a copy of the GNU General Public License along with thi
 see <https://www.gnu.org/licenses/>.
 """
 
-from scipy import stats
-from derep_genomes import __version__
-
 import subprocess
 import sys
 import os
 import shutil
 from derep_genomes.general import (
-    fast_flatten,
     get_arguments,
-    find_all_assemblies,
-    load_classifications,
     find_assemblies_for_accessions,
-    suppress_stdout,
-    get_assembly_filename,
-    applyParallel,
     is_debug,
-    get_assembly_length,
 )
 from derep_genomes.graph import dereplicate_ANI, dereplicate_xash, concat_df
 import logging
@@ -39,12 +29,6 @@ from derep_genomes.dbops import (
     check_if_db_empty,
     create_db_tables,
     check_db_tables,
-    retrieve_jobs_done,
-    db_insert_job_done,
-    db_insert_taxa,
-    db_insert_genomes,
-    db_insert_genomes_derep,
-    db_insert_results,
     check_if_done,
     retrieve_all_taxa_analyzed,
     retrieve_all_jobs_done,
@@ -53,12 +37,11 @@ from derep_genomes.dbops import (
     retrieve_all_genomes_derep,
 )
 from multiprocessing import Pool
-from concurrent.futures import ProcessPoolExecutor as PoolPE
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from tqdm import tqdm
 from functools import partial
 import pandas as pd
-import tempfile
 
 log = logging.getLogger("my_logger")
 
@@ -69,6 +52,7 @@ def process_one_taxon(taxon, parms):
     threshold = parms["threshold"]
     chunks = parms["chunks"]
     slurm_config = parms["slurm_config"]
+    slurm_threads = parms["slurm_threads"]
     tmp_dir = parms["tmp_dir"]
     max_jobs_array = parms["max_jobs_array"]
     xash_threshold = parms["xash_threshold"]
@@ -148,6 +132,7 @@ def process_one_taxon(taxon, parms):
             threshold=threshold,
             chunks=chunks,
             slurm_config=slurm_config,
+            slurm_threads=slurm_threads,
             tmp_dir=tmp_dir,
             max_jobs_array=max_jobs_array,
             min_genome_size=min_genome_size,
@@ -620,12 +605,30 @@ def main():
             to_do["taxonomy"].isin(classification_singletons)
         ].reset_index(drop=True)
 
-        classification_large = taxon_counts[taxon_counts["count"] > 1][
-            "taxonomy"
-        ].tolist()
-        classification_large = to_do[
-            to_do["taxonomy"].isin(classification_large)
-        ].reset_index(drop=True)
+        if args.slurm_config:
+            classification_small = taxon_counts[
+                taxon_counts["count"].isin(range(assm_min, assm_max + 1))
+            ]["taxonomy"].tolist()
+            classification_small = to_do[
+                to_do["taxonomy"].isin(classification_small)
+            ].reset_index(drop=True)
+
+            classification_large = taxon_counts[taxon_counts["count"] > assm_max][
+                "taxonomy"
+            ].tolist()
+
+            classification_large = to_do[
+                to_do["taxonomy"].isin(classification_large)
+            ].reset_index(drop=True)
+        else:
+            classification_small = taxon_counts[taxon_counts["count"] > 1][
+                "taxonomy"
+            ].tolist()
+            classification_small = to_do[
+                to_do["taxonomy"].isin(classification_small)
+            ].reset_index(drop=True)
+            classification_large = pd.DataFrame()
+
         if not classification_singletons.empty:
             log.info(
                 "Processing {:,} singletons".format(classification_singletons.shape[0])
@@ -640,71 +643,138 @@ def main():
         else:
             log.info("No singletons found\n")
 
-        if not classification_large.empty:
-            workers = args.workers
-            processes = args.threads // workers
-            taxons = list(set(classification_large["taxonomy"]))
-            if args.slurm_config is not None:
-                log.info(
-                    "Dereplicating {:,} taxa with more than {} assemblies using SLURM".format(
-                        len(taxons), assm_max
-                    )
-                )
-                parms_large = {
-                    "classification": classification_large,
-                    "threads": processes,
-                    "threshold": args.threshold,
-                    "chunks": args.chunks,
-                    "slurm_config": args.slurm_config.name,
-                    "tmp_dir": tmp_dir,
-                    "max_jobs_array": args.max_jobs_array,
-                    "xash_threshold": args.xash_threshold,
-                    "min_genome_size": args.min_genome_size,
-                    "ani_fraglen_fraction": args.ani_fraglen_fraction,
-                    "dashing": args.dashing,
-                    "assm_max": assm_max,
-                    "out_dir": args.out_dir,
-                    # "con": con,
-                    "copy": args.copy,
-                }
+        if not classification_small.empty:
+            if args.workers > 2:
+                workers = args.workers
+                processes = args.threads // workers
             else:
-                log.info(
-                    "Dereplicating {:,} taxa with more than 1 assemblies using {} threads".format(
-                        len(taxons), args.threads
-                    )
+                workers = 1
+                processes = args.threads
+            taxons = list(set(classification_small["taxonomy"]))
+            log.info(
+                "Dereplicating {:,} taxa with {} to {} assemblies using {} workers with {} threads".format(
+                    len(taxons), assm_min, assm_max, workers, processes
                 )
-                log.warning("This can take a long time!!!")
-                parms_large = {
-                    "classification": classification_large,
-                    "threads": processes,
-                    "threshold": args.threshold,
-                    "chunks": args.chunks,
-                    "slurm_config": None,
-                    "tmp_dir": tmp_dir,
-                    "max_jobs_array": args.max_jobs_array,
-                    "xash_threshold": args.xash_threshold,
-                    "min_genome_size": args.min_genome_size,
-                    "ani_fraglen_fraction": args.ani_fraglen_fraction,
-                    "dashing": args.dashing,
-                    "assm_max": args.assm_max,
-                }
+            )
+            parms_small = {
+                "classification": classification_small,
+                "threads": processes,
+                "threshold": args.threshold,
+                "chunks": args.chunks,
+                "slurm_config": None,
+                "slurm_threads": None,
+                "tmp_dir": tmp_dir,
+                "max_jobs_array": args.max_jobs_array,
+                "xash_threshold": args.xash_threshold,
+                "min_genome_size": args.min_genome_size,
+                "ani_fraglen_fraction": args.ani_fraglen_fraction,
+                "dashing": args.dashing,
+                "assm_max": assm_max,
+                "out_dir": args.out_dir,
+                # "con": con,
+                "copy": args.copy,
+            }
 
+            if is_debug():
+                dfs = list(
+                    map(partial(process_one_taxon, parms=parms_small), taxons),
+                )
+            else:
+
+                pbar = tqdm(
+                    total=len(taxons),
+                    desc="Taxa processed",
+                    leave=False,
+                    ncols=80,
+                )  # Init pbar
+                with ProcessPoolExecutor(workers) as executor:
+                    futures = [
+                        executor.submit(
+                            partial(process_one_taxon, taxon=tax, parms=parms_small)
+                        )
+                        for tax in taxons
+                    ]
+                    for _ in as_completed(futures):
+                        pbar.update(n=1)  # Increments counter
+                dfs = [f.result() for f in futures]
+                pbar.close()
+            # Get all failed jobs
+            failed_list = [x[2] for x in dfs if None not in dfs]
+            if all(v is None for v in failed_list):
+                failed = pd.DataFrame()
+            else:
+                failed = pd.concat([x[2] for x in dfs if None not in dfs])
+
+            derep_assemblies_list = [x[0] for x in dfs if None not in dfs]
+            if all(v is None for v in derep_assemblies_list):
+                derep_assemblies = pd.DataFrame()
+            else:
+                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
+
+            results_list = [x[1] for x in dfs if None not in dfs]
+            if all(v is None for v in results_list):
+                results = pd.DataFrame()
+            else:
+                results = pd.concat([x[1] for x in dfs if None not in dfs])
+
+            stats_df_list = [x[3] for x in dfs if None not in dfs]
+            if all(v is None for v in stats_df_list):
+                stats_df = pd.DataFrame()
+            else:
+                stats_df = pd.concat([x[3] for x in dfs if None not in dfs])
+
+            # Insert results into database
+            insert_to_db(
+                derep_assemblies=derep_assemblies,
+                results=results,
+                failed=failed,
+                stats_df=stats_df,
+                con=con,
+                threads=args.threads,
+                out_dir=args.out_dir,
+                copy=args.copy,
+            )
+        else:
+            log.info("No taxa with 2 to {} assemblies found\n".format(assm_max))
+
+        if not classification_large.empty:
+            taxons = list(set(classification_large["taxonomy"]))
+            parms_large = {
+                "classification": classification_large,
+                "threads": args.threads,
+                "threshold": args.threshold,
+                "chunks": args.chunks,
+                "slurm_config": args.slurm_config.name,
+                "slurm_threads": args.slurm_threads,
+                "tmp_dir": tmp_dir,
+                "max_jobs_array": args.max_jobs_array,
+                "xash_threshold": args.xash_threshold,
+                "min_genome_size": args.min_genome_size,
+                "ani_fraglen_fraction": args.ani_fraglen_fraction,
+                "dashing": args.dashing,
+                "assm_max": assm_max,
+                "out_dir": args.out_dir,
+                "copy": args.copy,
+            }
             if is_debug():
                 dfs = list(
                     map(partial(process_one_taxon, parms=parms_large), taxons),
                 )
             else:
-                p = PoolPE(max_workers=workers)
                 dfs = list(
                     tqdm(
-                        p.map(partial(process_one_taxon, parms=parms_large), taxons),
+                        map(partial(process_one_taxon, parms=parms_large), taxons),
                         total=len(taxons),
                         leave=False,
                         ncols=80,
                     )
                 )
-                p.close()
-                p.join()
+        else:
+            if args.slurm_config:
+                log.info(
+                    "No taxa with more than {} assemblies found\n".format(assm_max)
+                )
+
             # Get all failed jobs
             failed_list = [x[2] for x in dfs if None not in dfs]
             if all(v is None for v in failed_list):

@@ -54,7 +54,8 @@ DeRepG needs a folder containing assemblies in FASTA format and a file describin
 ```
 $ derepG --help
 
-usage: derepG [-h] --data FILE [--db DB] [--threads INT] [--prefix PREFIX] [--tmp DIR] [--threshold FLOAT] [--xash-threshold FLOAT] [--max-assemblies INT] [--slurm-config FILE] [--chunk-size INT] [--slurm-arr-size INT] [--selected-taxa FILE] [--copy] [--dashing] [--out-dir OUT_DIR] [--min-genome-size INT] [--ani-fraglen-fraction FLOAT] [--debug] [--version]
+usage: derepG [-h] --data FILE [--db DB] [--workers INT] [--threads INT] [--prefix PREFIX] [--tmp DIR] [--threshold FLOAT] [--xash-threshold FLOAT] [--max-assemblies INT] [--slurm-config FILE] [--chunk-size INT]
+              [--slurm-arr-size INT] [--selected-taxa FILE] [--copy] [--dashing] [--out-dir OUT_DIR] [--min-genome-size INT] [--ani-fraglen-fraction FLOAT] [--debug] [--version]
 
 Cluster assemblies in each taxon
 
@@ -64,8 +65,9 @@ required arguments:
 optional arguments:
   -h, --help            show this help message and exit
   --db DB               SQLite3 DB to store the results (default: derep-genomes.db)
-  --threads INT         Number of threads (for fastANI) (default: 16)
-  --prefix PREFIX       Prefix for the file name results. If not assigned it uses Ymd-HMS (default: 20221007-102411)
+  --workers INT         Number of workers to use (default: 2)
+  --threads INT         Number of threads to use (default: 2)
+  --prefix PREFIX       Prefix for the file name results. If not assigned it uses Ymd-HMS (default: 20221012-124218)
   --tmp DIR             Temporary directory (default: /tmp)
   --threshold FLOAT     Z-score filtering threshold (default: 2.0)
   --xash-threshold FLOAT
@@ -84,8 +86,7 @@ optional arguments:
 
 SLURM arguments:
   --slurm-config FILE   YAML configuration file for SLURM
-  --chunk-size INT      Number of genomes in each chunk for fastANI in SLURM (default: 10)
-  --slurm-arr-size INT  Slurm maximum job array size (default: 1000)
+  --chunk-size INT      Number of genomes in each chunk for fastANI i
   ```
 
 DeRepG uses an SQLite3 database to store the results and the different runs, so if it fails or you have a new set of genomes it doesn't need to rerun the whole dereplication.
@@ -95,7 +96,7 @@ One limitation of DeRepG is that fastANI might not be fast when one wants to do 
 One would run DeRepG as:
 
 ```bash
-derepG --data data/genomes --taxa data/bac120_taxonomy_r95-1K.tsv --threads 32 --tmp ./ --db test5k-1.db --copy --out-dir gtdb-derep-1k --slurm-config slurm.yaml
+derepG --data data/genomes --taxa data/bac120_taxonomy_r95-1K.tsv --workers 2 --threads 32 --tmp ./ --db test5k-1.db --copy --out-dir gtdb-derep-1k --slurm-config slurm.yaml
 ```
 
 *--data*: A TSV file Here we specify the location of the genomes in FASTA format (accepts gzipped files)
@@ -104,7 +105,9 @@ derepG --data data/genomes --taxa data/bac120_taxonomy_r95-1K.tsv --threads 32 -
 *--taxa*: A taxa file needs to have two columns like the one distributed by GTDB:
 > d__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Salmonella;s__Salmonella enterica
 
-*--threads*: This means that fastANI runs will be distributed in 16 jobs using 2 threads each
+*--workers*: Number of workers to use. This is the number of taxa to process in parallel. If you have a large number of taxa, you might want to increase this number.
+
+*--threads*: Total number of threads available for the workers. This is the number of threads used by fastANI and Mash/Dashing.
 
 *--tmp*: Location of the temporary folder
 
