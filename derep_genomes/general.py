@@ -62,7 +62,8 @@ help_msg = {
     "db": "SQLite3 DB to store the results",
     "prefix": "Prefix for the file name results. If not assigned it uses Ymd-HMS",
     "tmp": "Temporary directory",
-    "threads": "Number of threads (for fastANI)",
+    "workers": "Number of workers to use",
+    "threads": "Number of threads to use",
     "threshold": "Z-score filtering threshold",
     "slurm_config": "YAML configuration file for SLURM",
     "chunks": "Number of genomes in each chunk for fastANI in SLURM",
@@ -109,11 +110,19 @@ def get_arguments(argv=None):
         help=help_msg["db"],
     )
     optional.add_argument(
+        "--workers",
+        type=int,
+        metavar="INT",
+        dest="workers",
+        default=2,
+        help=help_msg["workers"],
+    )
+    optional.add_argument(
         "--threads",
         type=int,
         metavar="INT",
         dest="threads",
-        default=16,
+        default=2,
         help=help_msg["threads"],
     )
     optional.add_argument(

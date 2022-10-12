@@ -53,6 +53,8 @@ from derep_genomes.dbops import (
     retrieve_all_genomes_derep,
 )
 from multiprocessing import Pool
+from concurrent.futures import ProcessPoolExecutor as PoolPE
+
 from tqdm import tqdm
 from functools import partial
 import pandas as pd
@@ -75,10 +77,7 @@ def process_one_taxon(taxon, parms):
     failed_df = None
     dashing = parms["dashing"]
     assm_max = parms["assm_max"]
-    con = parms["con"]
     threads = parms["threads"]
-    out_dir = parms["out_dir"]
-    copy = parms["copy"]
 
     log.debug("Dereplicating {}".format(taxon))
     classification = classification[classification["taxonomy"] == taxon]
@@ -172,17 +171,6 @@ def process_one_taxon(taxon, parms):
                 stats_df.loc[:, "taxonomy"] = taxon
             else:
                 stats_df = pd.DataFrame()
-
-        insert_to_db(
-            derep_assemblies=derep_assemblies,
-            results=results,
-            failed=failed_df,
-            stats_df=stats_df,
-            con=con,
-            threads=threads,
-            out_dir=out_dir,
-            copy=copy,
-        )
 
         return derep_assemblies, results, failed_df, stats_df
 
@@ -653,6 +641,8 @@ def main():
             log.info("No singletons found\n")
 
         if not classification_large.empty:
+            workers = args.workers
+            processes = args.threads // workers
             taxons = list(set(classification_large["taxonomy"]))
             if args.slurm_config is not None:
                 log.info(
@@ -662,7 +652,7 @@ def main():
                 )
                 parms_large = {
                     "classification": classification_large,
-                    "threads": args.threads,
+                    "threads": processes,
                     "threshold": args.threshold,
                     "chunks": args.chunks,
                     "slurm_config": args.slurm_config.name,
@@ -674,7 +664,7 @@ def main():
                     "dashing": args.dashing,
                     "assm_max": assm_max,
                     "out_dir": args.out_dir,
-                    "con": con,
+                    # "con": con,
                     "copy": args.copy,
                 }
             else:
@@ -686,7 +676,7 @@ def main():
                 log.warning("This can take a long time!!!")
                 parms_large = {
                     "classification": classification_large,
-                    "threads": args.threads,
+                    "threads": processes,
                     "threshold": args.threshold,
                     "chunks": args.chunks,
                     "slurm_config": None,
@@ -697,9 +687,6 @@ def main():
                     "ani_fraglen_fraction": args.ani_fraglen_fraction,
                     "dashing": args.dashing,
                     "assm_max": args.assm_max,
-                    "out_dir": args.out_dir,
-                    "con": con,
-                    "copy": args.copy,
                 }
 
             if is_debug():
@@ -707,14 +694,53 @@ def main():
                     map(partial(process_one_taxon, parms=parms_large), taxons),
                 )
             else:
+                p = PoolPE(max_workers=workers)
                 dfs = list(
                     tqdm(
-                        map(partial(process_one_taxon, parms=parms_large), taxons),
+                        p.map(partial(process_one_taxon, parms=parms_large), taxons),
                         total=len(taxons),
                         leave=False,
                         ncols=80,
                     )
                 )
+                p.close()
+                p.join()
+            # Get all failed jobs
+            failed_list = [x[2] for x in dfs if None not in dfs]
+            if all(v is None for v in failed_list):
+                failed = pd.DataFrame()
+            else:
+                failed = pd.concat([x[2] for x in dfs if None not in dfs])
+
+            derep_assemblies_list = [x[0] for x in dfs if None not in dfs]
+            if all(v is None for v in derep_assemblies_list):
+                derep_assemblies = pd.DataFrame()
+            else:
+                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
+
+            results_list = [x[1] for x in dfs if None not in dfs]
+            if all(v is None for v in results_list):
+                results = pd.DataFrame()
+            else:
+                results = pd.concat([x[1] for x in dfs if None not in dfs])
+
+            stats_df_list = [x[3] for x in dfs if None not in dfs]
+            if all(v is None for v in stats_df_list):
+                stats_df = pd.DataFrame()
+            else:
+                stats_df = pd.concat([x[3] for x in dfs if None not in dfs])
+
+            # Insert results into database
+            insert_to_db(
+                derep_assemblies=derep_assemblies,
+                results=results,
+                failed=failed,
+                stats_df=stats_df,
+                con=con,
+                threads=args.threads,
+                out_dir=args.out_dir,
+                copy=args.copy,
+            )
 
         jobs_done = retrieve_all_jobs_done(con)
         jobs_failed = retrieve_all_jobs_failed(con)

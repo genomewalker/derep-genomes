@@ -678,8 +678,6 @@ def check_pw(pw, assms):
         df_target.columns = ["assm"]
         df_assms = concat_df([df_source, df_target]).drop_duplicates()
         ids = df_assms["assm"].to_list()
-        #    ids = list(set(pw["source"].tolist() + pw["target"].tolist()))
-        # ids = list(set(pw.source).union(set(pw.target)))
         # Find if we are missing any assmebly (too divergent)
         diffs = list(set(assms) - set(ids))
         res = {"missing": diffs, "failed": False}
