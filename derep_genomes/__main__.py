@@ -739,6 +739,11 @@ def main():
 
         if not classification_large.empty:
             taxons = list(set(classification_large["taxonomy"]))
+            log.info(
+                "Dereplicating {:,} taxa with more than {} assemblies using SLURM with {} threads".format(
+                    len(taxons), assm_max, args.slurm_threads
+                )
+            )
             parms_large = {
                 "classification": classification_large,
                 "threads": args.threads,
