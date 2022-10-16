@@ -1192,7 +1192,7 @@ def dereplicate_ANI(
     all_assemblies_tmp = all_assemblies.copy()
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
         failed = None
-        if n_assemblies < assm_max or slurm_config is None:
+        if n_assemblies <= 100 or slurm_config is None:
             if (n_assemblies * n_assemblies) < threads:
                 threads = n_assemblies * n_assemblies
             log.debug(

@@ -774,12 +774,6 @@ def main():
                         ncols=80,
                     )
                 )
-        else:
-            if args.slurm_config:
-                log.info(
-                    "No taxa with more than {} assemblies found\n".format(assm_max)
-                )
-
             # Get all failed jobs
             failed_list = [x[2] for x in dfs if None not in dfs]
             if all(v is None for v in failed_list):
@@ -816,6 +810,11 @@ def main():
                 out_dir=args.out_dir,
                 copy=args.copy,
             )
+        else:
+            if args.slurm_config:
+                log.info(
+                    "No taxa with more than {} assemblies found\n".format(assm_max)
+                )
 
         jobs_done = retrieve_all_jobs_done(con)
         jobs_failed = retrieve_all_jobs_failed(con)
