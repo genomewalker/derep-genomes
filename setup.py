@@ -6,10 +6,11 @@ requirements = [
     "scipy>=1.5.2",
     "networkx>=2.5",
     "simple-slurm>=0.2.2",
-    "tqdm==4.50.0",
+    "tqdm>=4.62.2",
     "PyYAML>=5.4",
     "leidenalg>=0.8.2",
     "python-igraph>=0.8.3",
+    "biopython>=1.78",
 ]
 
 setup(

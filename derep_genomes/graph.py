@@ -1,20 +1,15 @@
 import math
 import tempfile
-from statistics import mean, median, stdev
+from statistics import mean, stdev
 import leidenalg
 import networkx as nx
 import igraph as ig
-from networkx.generators.geometric import thresholded_random_geometric_graph
-from numpy.lib.function_base import select
 import pandas as pd
 from scipy import stats
 import subprocess
 import pandas as pd
 from derep_genomes.general import (
-    get_open_func,
     get_assembly_length,
-    get_contig_lengths,
-    get_assembly_n50,
     is_debug,
 )
 import logging
@@ -26,13 +21,15 @@ import yaml
 from multiprocessing import Pool
 import tqdm
 import io, sys
-from multiprocessing.pool import ThreadPool
+import numpy as np
+from functools import partial
+import random
 
 log = logging.getLogger("my_logger")
 
 
 class representative:
-    def __init__(self, name, graph, pw, threshold=2.0):
+    def __init__(self, name, graph, threshold=2.0):
         self.name = name
         self.n_nodes = len(list(graph.nodes))
         self.graph_avg_weight = None
@@ -49,10 +46,7 @@ class representative:
         self.subgraph_discarded_sd_weight = None
         self.subgraph_discarded_avg_weight_raw = None
         self.subgraph_discarded_sd_weight_raw = None
-
-        self.selected = self.refine_candidates(
-            subgraph=graph, pw=pw, threshold=threshold
-        )
+        self.selected = self.refine_candidates(subgraph=graph, threshold=threshold)
 
         (
             self.graph_avg_weight,
@@ -93,12 +87,15 @@ class representative:
             weights.append(d["weight"])
             weights_raw.append(d["weight_raw"])
         # if len(list(g.edges)) > 1:
-        mean_weight = mean(weights)
-        mean_weight_raw = mean(weights_raw)
+
         if len(list(g.edges)) > 1:
+            mean_weight = mean(weights)
+            mean_weight_raw = mean(weights_raw)
             sd_weight = stdev(weights)
             sd_weight_raw = stdev(weights_raw)
         else:
+            mean_weight = None
+            mean_weight_raw = None
             sd_weight = None
             sd_weight_raw = None
 
@@ -111,8 +108,6 @@ class representative:
         return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
 
     def get_subgraph_selected(self, g, nodes):
-        weights = []
-        weights_raw = []
         subgraph = nx.subgraph(g, nodes)
         mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
             g=subgraph
@@ -120,15 +115,13 @@ class representative:
         return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
 
     def get_subgraph_discarded(self, g, nodes):
-        weights = []
-        weights_raw = []
         subgraph = nx.subgraph(g, nodes)
         mean_weight, sd_weight, mean_weight_raw, sd_weight_raw = self.get_weight_stats(
             g=subgraph
         )
         return mean_weight, sd_weight, mean_weight_raw, sd_weight_raw
 
-    def refine_candidates(self, subgraph, pw, threshold):
+    def refine_candidates(self, subgraph, threshold):
         rep = self.name
         results = []
         len_diff = 0
@@ -137,26 +130,13 @@ class representative:
             return [rep]
         for reachable_node in nx.all_neighbors(subgraph, rep):
             if reachable_node != rep:
-                idx = pw["target"] == rep
-                pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
-                    idx, ["target", "source", "target_len", "source_len"]
-                ].values
-
-                df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
-
-                # Switch column order
-                # idx = df["target"] == rep
-                # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
-                #     idx, ["target", "source", "target_len", "source_len"]
-                # ].values
-
-                source_len = mean(df.source_len.values)
-                target_len = mean(df.target_len.values)
+                source_len = subgraph.nodes[rep]["genome_len"]
+                target_len = subgraph.nodes[reachable_node]["genome_len"]
                 len_diff = abs(source_len - target_len)
-                weight = mean(df.weight.values)
+                weight = subgraph[rep][reachable_node]["weight_raw"]
 
-                if "aln_frac" in df.columns:
-                    aln_frac = mean(df.aln_frac.values)
+                if "aln_frac" in subgraph[rep][reachable_node]:
+                    aln_frac = subgraph[rep][reachable_node]["aln_frac"]
                     results.append(
                         {
                             "source": rep,
@@ -200,13 +180,38 @@ class representative:
             else:
                 df["z_score_diff"] = stats.zscore(df["len_diff"])
 
-            if "aln_frac" in df.columns:
+            if is_unique(df["weight"]):
+                df["z_score_weight"] = 0
+            else:
+                df["z_score_weight"] = stats.zscore(df["weight"])
+
+            if set(["aln_frac", "len_diff", "weight"]).issubset(df.columns):
+                df = df[
+                    (df["z_score_aln"].abs() >= threshold)
+                    | (df["z_score_diff"].abs() >= threshold)
+                    | (df["z_score_weight"].abs() >= threshold)
+                ]
+            elif set(["aln_frac", "len_diff"]).issubset(df.columns):
                 df = df[
                     (df["z_score_aln"].abs() >= threshold)
                     | (df["z_score_diff"].abs() >= threshold)
                 ]
-            else:
+            elif set(["aln_frac", "weight"]).issubset(df.columns):
+                df = df[
+                    (df["z_score_aln"].abs() >= threshold)
+                    | (df["z_score_weight"].abs() >= threshold)
+                ]
+            elif set(["len_diff", "weight"]).issubset(df.columns):
+                df = df[
+                    (df["z_score_diff"].abs() >= threshold)
+                    | (df["z_score_weight"].abs() >= threshold)
+                ]
+            elif "aln_frac" in df.columns:
+                df = df[(df["z_score_aln"].abs() >= threshold)]
+            elif "len_diff" in df.columns:
                 df = df[(df["z_score_diff"].abs() >= threshold)]
+            elif "weight" in df.columns:
+                df = df[(df["z_score_weight"].abs() >= threshold)]
 
             assms = df["target"].tolist()
 
@@ -293,23 +298,40 @@ def process_fastANI_results(rfile):
         sep="\t",
         names=["source", "target", "ANI", "frags", "total_frags"],
     )
-    # log.debug("Loaded {} comparinsons from ANI file".format(df.shape[0]))
-    df["aln_frac"] = df["frags"] / df["total_frags"]
-    df["weight"] = df["ANI"].div(100)
-    df["weight_raw"] = df["ANI"].div(100)
-    df["weight"] = df["weight"] * df["aln_frac"]
-    df1 = pd.DataFrame(
-        set(df["source"].tolist() + df["target"].tolist()),
-        columns=["assm"],
-    )
-
-    df1["len"] = df1["assm"].map(lambda x: get_assembly_length(x))
-    # df1["n50"] = df1["assm"].map(lambda x: get_assembly_n50(x))
-
-    df = df.merge(df1.rename(columns={"assm": "source", "len": "source_len"}))
-    df = df.merge(df1.rename(columns={"assm": "target", "len": "target_len"}))
     os.remove(rfile)
     return df
+
+
+def generate_ANI_pairwise(df):
+    df = df.copy()
+    if df.empty:
+        return None
+    else:
+        df["aln_frac"] = df["frags"] / df["total_frags"]
+        # sort duplicates in reverse order
+        df.loc[:, ["source", "target"]] = np.sort(df.filter(items=["source", "target"]))
+
+        # Get ANI average for each pairwise comparison
+        df = (
+            df.groupby(["source", "target"])
+            .agg(ANI=("ANI", "mean"), aln_frac=("aln_frac", "max"))
+            .reset_index()
+        )
+
+        df["weight"] = df["ANI"].div(100)
+        df["weight_raw"] = df["ANI"].div(100)
+        df["weight"] = df["weight"] * df["aln_frac"]
+        df1 = pd.DataFrame(
+            set(df["source"].tolist() + df["target"].tolist()),
+            columns=["assm"],
+        )
+
+        df1["len"] = df1["assm"].map(lambda x: get_assembly_length(x))
+        # df1["n50"] = df1["assm"].map(lambda x: get_assembly_n50(x))
+
+        df = df.merge(df1.rename(columns={"assm": "source", "len": "source_len"}))
+        df = df.merge(df1.rename(columns={"assm": "target", "len": "target_len"}))
+        return df
 
 
 def binary_search_filter(g, low, high, weights):
@@ -408,6 +430,108 @@ def binary_search_filter(g, low, high, weights):
             return g, None
 
 
+def get_eigen(g):
+    if g.ecount() == 0:
+        if g.vcount() == 1:
+            log.debug("No edges found, one node found")
+            rep = g.vs[0]["name"]
+        else:
+            log.debug("No edges found, multiple nodes found")
+            rep = random.choice(g.vs["name"])
+    else:
+        cents = g.eigenvector_centrality(directed=False, weights="weight")
+        cents = {g.vs[i]["name"]: cents[i] for i in range(len(cents))}
+        rep = max(cents.keys(), key=(lambda k: cents[k]))
+    return rep
+
+
+def get_subgraph(nodes, graph, threshold, stats=False):
+    if nodes is None:
+        subgraph = graph
+    else:
+        subgraph = graph.subgraph(nodes)
+    subgraph_i = __from_nx_to_igraph(subgraph)
+    rep = get_eigen(subgraph_i)
+    if stats:
+        reps, stats_df = get_representatives(rep, subgraph, threshold, stats)
+        return rep, reps, stats_df
+    else:
+        # refine representatives
+        reps = get_representatives(rep, subgraph, threshold, stats)
+        return rep, reps
+
+
+def get_subgraphs_parallel(graph, partition, threads, threshold, stats=False):
+    """
+    This function takes a graph and a partition and returns a list of subgraphs
+    """
+    nodes = []
+    if len(set([partition[k] for k in partition])) <= 1:
+        nodes = [graph.nodes()]
+    else:
+        for i in set([partition[k] for k in partition]):
+            nodes.append([k for k in partition if partition[k] == i])
+
+    p = Pool(
+        threads,
+        # initializer=initializer,
+        # initargs=([parms, graph],),
+    )
+    if is_debug():
+        rep_list = list(
+            tqdm.tqdm(
+                p.imap_unordered(
+                    partial(
+                        get_subgraph, threshold=threshold, graph=graph, stats=stats
+                    ),
+                    nodes,
+                ),
+                total=len(nodes),
+                leave=False,
+                ncols=80,
+                desc="Subgraphs processed",
+            )
+        )
+    else:
+        rep_list = list(
+            p.imap_unordered(
+                partial(get_subgraph, threshold=threshold, graph=graph, stats=stats),
+                nodes,
+            )
+        )
+    p.close()
+    p.join()
+    rep = [i[0] for i in rep_list]
+    reps = fast_flatten([i[1] for i in rep_list])
+    if stats:
+        stat_df = concat_df([i[2] for i in rep_list])
+        return rep, reps, stat_df
+    else:
+
+        return rep, reps
+
+
+def get_reps_parallel(subgraphs, threads=1):
+    log.debug("Finding the most central assemblies in the graph")
+    log.debug("Running eigenvector centrality in parallel")
+    subgraphs = [i[1] for i in subgraphs]
+    p = Pool(threads)
+    if is_debug():
+        reps = list(
+            tqdm.tqdm(
+                p.imap(get_eigen, subgraphs),
+                leave=False,
+                ncols=80,
+                total=len(subgraphs),
+            )
+        )
+    else:
+        reps = list(p.imap(get_eigen, subgraphs))
+    p.close()
+    p.join()
+    return reps
+
+
 def get_reps(graph, partition):
     log.debug("Finding the most central assemblies in the graph")
     """
@@ -419,11 +543,15 @@ def get_reps(graph, partition):
         nodes = [k for k in partition if partition[k] == i]
         subgraph = graph.subgraph(nodes)
         subgraphs.append(subgraph)
-        cents = nx.eigenvector_centrality(
-            subgraph, weight="weight", max_iter=10000, tol=1e-4
-        )
-        rep = max(cents.keys(), key=(lambda k: cents[k]))
-        reps.append(rep)
+        g = __from_nx_to_igraph(subgraph)
+        if (g.vcount() > 1) and (g.ecount() > 1):
+            cents = g.eigenvector_centrality(directed=False, weights="weight")
+            cents = {g.vs[i]["name"]: cents[i] for i in range(len(cents))}
+            # cents = nx.voterank(subgraph)
+            rep = max(cents.keys(), key=(lambda k: cents[k]))
+            reps.append(rep)
+        else:
+            reps.append(nodes)
     return reps, subgraphs
 
 
@@ -440,8 +568,9 @@ def save_chunks_to_disk(chunks, temp_dir):
     return file_chunks, wdir
 
 
-def create_slurm_commands(files, wdir, frag_len):
+def create_slurm_commands(files, wdir, frag_len, slurm_threads):
     file_list = list(product(files.keys(), files.keys()))
+    file_list.sort(key=lambda tup: tup[1])
     odir = os.path.join(wdir, "fastANI_out")
     Path(odir).mkdir(parents=True, exist_ok=True)
     cmds = []
@@ -451,6 +580,8 @@ def create_slurm_commands(files, wdir, frag_len):
         cmd = " ".join(
             [
                 "fastANI",
+                "-t",
+                str(slurm_threads),
                 "--ql",
                 files[file[0]],
                 "--rl",
@@ -488,7 +619,7 @@ def map_slurm_jobs(cmds, slurm_config, odir, max_jobs_array, tmp_dir, threads):
             #     tmp_dir, Slurm.JOB_ARRAY_MASTER_ID, Slurm.JOB_ARRAY_ID
             "/dev/null"
             # )
-        )
+        ),
     )
 
     if len(cmds) > max_jobs_array:
@@ -505,16 +636,16 @@ def map_slurm_jobs(cmds, slurm_config, odir, max_jobs_array, tmp_dir, threads):
     )
 
     df = pd.read_csv(rfile, header=None)
-    pw = []
+
+    ofiles_list = []
+
     for r in job_ranges:
         rfile_tmp = os.path.join(odir, "fastANI_out_jobs-tmp.txt")
-        skrows = min(r) - 1
-        nrows = max(r)
         df1 = df.iloc[(min(r) - 1) : (max(r))]
         df1.columns = ["cmd"]
 
-        ofiles = df1["cmd"].str.rsplit(" ", 1).str[-1].values
-
+        ofiles = df1["cmd"].str.rsplit(" ", n=1).str[-1].values
+        ofiles_list.append(ofiles)
         df1.to_csv(rfile_tmp, index=False, sep="\t", header=False)
         new_r = range(1, df1.shape[0] + 1)
 
@@ -526,30 +657,29 @@ def map_slurm_jobs(cmds, slurm_config, odir, max_jobs_array, tmp_dir, threads):
         job_id = slurm.sbatch(bjob)
         sys.stdout = sys.__stdout__
         job_ids.append(job_id)
-        pairwise_distances = reduce_slurm_jobs(ofiles, threads)
-        pw.append(pairwise_distances)
-    return pw
+    log.debug("Reducing {} jobs from SLURM".format(len(job_ids)))
+    pairwise_distances = reduce_slurm_jobs(fast_flatten(ofiles_list), threads)
+    # pw.append(pairwise_distances)
+    return pairwise_distances
 
 
 def check_pw(pw, assms):
     res = {}
 
-    if pw.empty:
-        res = {"missing": [], "failed": True}
+    if pw is not None:
+        df_source = pw.source.drop_duplicates().to_frame()
+        df_source.columns = ["assm"]
+        df_target = pw.target.drop_duplicates().to_frame()
+        df_target.columns = ["assm"]
+        df_assms = concat_df([df_source, df_target]).drop_duplicates()
+        ids = df_assms["assm"].to_list()
+        # Find if we are missing any assmebly (too divergent)
+        diffs = list(set(assms) - set(ids))
+        res = {"missing": diffs, "failed": False}
         return res
-
-    df_source = pw.source.drop_duplicates().to_frame()
-    df_source.columns = ["assm"]
-    df_target = pw.target.drop_duplicates().to_frame()
-    df_target.columns = ["assm"]
-    df_assms = concat_df([df_source, df_target]).drop_duplicates()
-    ids = df_assms["assm"].to_list()
-    #    ids = list(set(pw["source"].tolist() + pw["target"].tolist()))
-    # ids = list(set(pw.source).union(set(pw.target)))
-    # Find if we are missing any assmebly (too divergent)
-    diffs = list(set(assms) - set(ids))
-    res = {"missing": diffs, "failed": False}
-    return res
+    else:
+        res = {"missing": assms, "failed": True}
+        return res
 
 
 # From https://gist.github.com/TariqAHassan/fc77c00efef4897241f49e61ddbede9e
@@ -569,15 +699,12 @@ def concat_df(frames):
 
 
 def reduce_slurm_jobs(ofiles, threads):
-    # if is_debug():
-    #     dfs = list(
-    #         map(process_fastANI_results, ofiles),
-    #     )
-    # else:
     p = Pool(threads)
     dfs = list(
-        p.imap_unordered(process_fastANI_results, ofiles),
+        p.imap(process_fastANI_results, ofiles),
     )
+    p.close()
+    p.join()
     dfs = concat_df(dfs)
     return dfs
 
@@ -588,9 +715,7 @@ def is_unique(s):
 
 
 def estimate_frag_len(all_assemblies, min_genome_size, ani_fraglen_fraction):
-    assm_lens = (
-        all_assemblies["assembly"].map(lambda x: get_assembly_length(x)).tolist()
-    )
+    assm_lens = all_assemblies["file"].map(lambda x: get_assembly_length(x)).tolist()
     x = min(assm_lens)
     if x < 3000:
         frag_len = math.floor(x / 500.0) * 500.0
@@ -613,19 +738,26 @@ def estimate_frag_len(all_assemblies, min_genome_size, ani_fraglen_fraction):
 
 
 def create_graph(pairwise_distances):
-    M = nx.from_pandas_edgelist(
-        pairwise_distances, edge_attr=True, create_using=nx.MultiGraph()
+    log.debug("Creating graph step1..")
+    if "weight_raw" not in pairwise_distances:
+        pairwise_distances["weight_raw"] = pairwise_distances["weight"]
+    G = nx.from_pandas_edgelist(
+        pairwise_distances, edge_attr=True, create_using=nx.Graph()
     )
-    G = nx.Graph()
-    for u, v, data in M.edges(data=True):
-        if not G.has_edge(u, v):
-            # set weight to 1 if no weight is given for edge in M
-            weight_raw = mean(
-                d.get("weight_raw", 0) for d in M.get_edge_data(u, v).values()
-            )
-            weight = mean(d.get("weight", 0) for d in M.get_edge_data(u, v).values())
-            G.add_edge(u, v, weight=weight, weight_raw=weight_raw)
-    # Remove self loops
+    log.debug("Creating graph step1-1..")
+
+    source = pairwise_distances[["source", "source_len"]].drop_duplicates()
+    source.columns = ["node", "genome_len"]
+    target = pairwise_distances[["target", "target_len"]].drop_duplicates()
+    target.columns = ["node", "genome_len"]
+    df = concat_df([source, target]).drop_duplicates()
+    log.debug("Creating graph step1-2..")
+
+    node_attr = df.set_index("node").to_dict("index")
+    nx.set_node_attributes(G, node_attr)
+    log.debug("Creating graph step1-3..")
+
+    log.debug("Creating graph step2...")
     G.remove_edges_from(list(nx.selfloop_edges(G)))
     # Identify isolated nodes
     isolated = list(nx.isolates(G))
@@ -640,7 +772,7 @@ def filter_graph(G):
         # TODO: Check how many components do we have
         n_comp = nx.number_connected_components(G)
         if n_comp > 1:
-            log.debug("Graph with {} component(s".format(n_comp))
+            log.debug("Graph with {} components".format(n_comp))
             for component in sorted(nx.connected_components(G), key=len, reverse=True):
                 component = G.subgraph(component).copy()
                 weights = []
@@ -653,7 +785,10 @@ def filter_graph(G):
                 G_filt, w_filt = binary_search_filter(
                     g=component, low=0, high=len(weights) - 1, weights=weights
                 )
-                graphs_filt.append(G_filt)
+                if G_filt.number_of_edges() == 0:
+                    graphs_filt.append(component)
+                else:
+                    graphs_filt.append(G_filt)
                 w_filts.append(w_filt)
         else:
             weights = []
@@ -746,10 +881,12 @@ def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
     df_target = mash_out.target.drop_duplicates().reset_index(drop=True)
     df_assms = pd.concat([df_source, df_target]).to_frame()
     df_assms.columns = ["assm"]
-    p = ThreadPool(processes=threads)
+    p = Pool(processes=threads)
     df_assms.loc[:, "len"] = list(
         p.imap(get_assembly_length, df_assms["assm"].to_list())
     )
+    p.close()
+    p.join()
 
     df_assms.columns = ["source", "source_len"]
     mash_out = mash_out.merge(df_assms)
@@ -760,110 +897,273 @@ def run_mash(mash_sketch, threads, mash_threshold, temp_dir):
     return mash_out
 
 
-def dereplicate_mash(all_assemblies, threads, tmp_dir, mash_threshold, threshold):
-    partitions = []
-    all_assemblies_tmp = all_assemblies.copy()
-    w_filt = 1 - mash_threshold
+def run_dashing(fname, threads, dashing_threshold, temp_dir):
 
-    with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-mash") as temp_dir:
-        fname = os.path.join(temp_dir, "assemblies.txt")
-        all_assemblies_tmp["assembly"].to_csv(fname, index=False, header=False)
-        mash_sketch = create_mash_sketch(fname, temp_dir, threads)
-        mash_dist = run_mash(
-            mash_sketch, threads=threads, mash_threshold=w_filt, temp_dir=temp_dir
+    dashing_fout = os.path.join(temp_dir, "dash.tsv")
+    dashing_command = [
+        "dashing",
+        "dist",
+        "-p",
+        str(threads),
+        "-k",
+        "21",
+        "-S",
+        "12",
+        "--full-mash-dist",
+        "--use-bb-minhash",
+        "-b",
+        "-T",
+        "-F",
+        str(fname),
+        "-M",
+        "-O",
+        str(dashing_fout),
+    ]
+    # mash_out = subprocess.run(mash_command, stdout=subprocess.PIPE).stdout.decode()
+    log.debug("Running Dashing...")
+    subprocess.run(dashing_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    log.debug("Reading Dashing results")
+    dashing_out = pd.read_csv(dashing_fout, sep="\t", index_col=0)
+    log.debug("Reading Dashing results... done")
+    dashing_out = dashing_out.mask(np.tril(np.ones(dashing_out.shape)).astype(bool))
+    dashing_out = dashing_out.stack().reset_index()
+    dashing_out.columns = ["source", "target", "weight"]
+    # remove rows with self-comparisons
+    dashing_out = dashing_out[dashing_out["source"] != dashing_out["target"]]
+    dashing_out.loc[:, "weight"] = 1 - dashing_out["weight"]
+    log.debug(
+        "Extracting comparisons with Dashing distance >= {}".format(dashing_threshold)
+    )
+    dashing_out = dashing_out[dashing_out["weight"] >= dashing_threshold]
+    log.debug("Calculating genome lengths...")
+
+    df_source = dashing_out.source.drop_duplicates().reset_index(drop=True)
+    df_target = dashing_out.target.drop_duplicates().reset_index(drop=True)
+    df_assms = pd.concat([df_source, df_target]).to_frame()
+    df_assms.columns = ["assm"]
+
+    p = Pool(processes=threads)
+    df_assms.loc[:, "len"] = list(
+        p.imap(get_assembly_length, df_assms["assm"].to_list())
+    )
+    p.close()
+    p.join()
+    df_assms.columns = ["source", "source_len"]
+    dashing_out = dashing_out.merge(df_assms)
+
+    df_assms.columns = ["target", "target_len"]
+    dashing_out = dashing_out.merge(df_assms)
+
+    return dashing_out
+
+
+def get_representatives(rep, subgraph, threshold, stats=False):
+    derep_assemblies = []
+    if len(list(subgraph.nodes)) > 1:
+        can = representative(name=rep, graph=subgraph, threshold=threshold)
+        candidates = [can.name] + can.selected
+        stats_df = pd.DataFrame(
+            [
+                (
+                    rep,
+                    can.n_nodes,
+                    can.n_nodes_selected,
+                    can.n_nodes_discarded,
+                    can.graph_avg_weight,
+                    can.graph_sd_weight,
+                    can.graph_avg_weight_raw,
+                    can.graph_sd_weight_raw,
+                    can.subgraph_selected_avg_weight,
+                    can.subgraph_selected_sd_weight,
+                    can.subgraph_selected_avg_weight_raw,
+                    can.subgraph_selected_sd_weight_raw,
+                    can.subgraph_discarded_avg_weight,
+                    can.subgraph_discarded_sd_weight,
+                    can.subgraph_discarded_avg_weight_raw,
+                    can.subgraph_discarded_sd_weight_raw,
+                )
+            ],
+            columns=[
+                "representative",
+                "n_nodes",
+                "n_nodes_selected",
+                "n_nodes_discarded",
+                "graph_avg_weight",
+                "graph_sd_weight",
+                "graph_avg_weight_raw",
+                "graph_sd_weight_raw",
+                "subgraph_selected_avg_weight",
+                "subgraph_selected_sd_weight",
+                "subgraph_selected_avg_weight_raw",
+                "subgraph_selected_sd_weight_raw",
+                "subgraph_discarded_avg_weight",
+                "subgraph_discarded_sd_weight",
+                "subgraph_discarded_avg_weight_raw",
+                "subgraph_discarded_sd_weight_raw",
+            ],
         )
+    else:
+        candidates = [rep]
+        stats_df = pd.DataFrame(
+            [
+                (
+                    rep,
+                    1,
+                    1,
+                    0,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                    np.NaN,
+                )
+            ],
+            columns=[
+                "representative",
+                "n_nodes",
+                "n_nodes_selected",
+                "n_nodes_discarded",
+                "graph_avg_weight",
+                "graph_sd_weight",
+                "graph_avg_weight_raw",
+                "graph_sd_weight_raw",
+                "subgraph_selected_avg_weight",
+                "subgraph_selected_sd_weight",
+                "subgraph_selected_avg_weight_raw",
+                "subgraph_selected_sd_weight_raw",
+                "subgraph_discarded_avg_weight",
+                "subgraph_discarded_sd_weight",
+                "subgraph_discarded_avg_weight_raw",
+                "subgraph_discarded_sd_weight_raw",
+            ],
+        )
+
+    if len(candidates) > 1:
+        for candidate in candidates:
+            derep_assemblies.append(candidate)
+    else:
+        derep_assemblies = candidates
+    if stats:
+        return derep_assemblies, stats_df
+    else:
+        return derep_assemblies
+
+
+def dereplicate_xash(
+    all_assemblies, threads, tmp_dir, xash_threshold, threshold, dashing=False
+):
+    all_assemblies_tmp = all_assemblies.copy()
+
+    w_filt = 1 - xash_threshold
+
+    with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-xash") as temp_dir:
+        fname = os.path.join(temp_dir, "assemblies.txt")
+        all_assemblies_tmp["file"].to_csv(fname, index=False, header=False)
+        if dashing:
+            xash_dist = run_dashing(
+                fname, threads=threads, dashing_threshold=w_filt, temp_dir=temp_dir
+            )
+        else:
+            mash_sketch = create_mash_sketch(fname, temp_dir, threads)
+            xash_dist = run_mash(
+                mash_sketch, threads=threads, mash_threshold=w_filt, temp_dir=temp_dir
+            )
 
     log.debug("Checking we have all genomes")
-    pw = check_pw(pw=mash_dist, assms=all_assemblies_tmp["assembly"].tolist())
+    pw = check_pw(pw=xash_dist, assms=all_assemblies_tmp["file"].tolist())
 
     if pw["failed"]:
-        log.debug("Failed. Reason: Assemblies too divergent")
-        failed = "Assemblies too divergent"
-        return None, None, failed
-
-    missing = pw["missing"]
-
-    if len(missing) > 0:
-        log.debug(
-            "Missing {:,} assemblies in the MASH comparison, Assemblies too divergent".format(
-                len(missing)
-            )
-        )
-
-    # Convert pw dist to graph
-    log.debug("Generating MASH graph")
-    # mash_dist = mash_dist[(mash_dist.weight >= float(w_filt))]
-
-    G, isolated = create_graph(mash_dist)
-    if G.number_of_edges() == 0:
-        log.debug("Only self loops found")
+        log.debug("Assemblies to divergent, returning all assemblies")
         all_assemblies_tmp.loc[:, "representative"] = 1
         all_assemblies_tmp.loc[:, "derep"] = 1
-
         return all_assemblies_tmp
+    else:
+        missing = pw["missing"]
+        if len(missing) > 0:
+            if dashing:
+                log.debug(
+                    "Missing {:,} assemblies in the Dashing comparison, Assemblies too divergent".format(
+                        len(missing)
+                    )
+                )
+            else:
+                log.debug(
+                    "Missing {:,} assemblies in the MASH comparison, Assemblies too divergent".format(
+                        len(missing)
+                    )
+                )
 
-    # TODO: streamline this
-    # G_filt, w_filt = filter_graph(G)
-    # edges2rm = [
-    #     (u, v) for u, v, d in G.edges(data=True) if float(d["weight"]) <= float(w_filt)
-    # ]
-    # G.remove_edges_from(edges2rm)
-    G_filt = G
-    partition = get_communities(G_filt)
-
-    log.debug(
-        "Graph properties: w_filt={} edges={} density={} components={} communities={}".format(
-            w_filt,
-            G_filt.number_of_edges(),
-            nx.density(G_filt),
-            nx.number_connected_components(G_filt),
-            len(set([partition[k] for k in partition])),
-        )
-    )
-    reps, subgraphs = get_reps(graph=G_filt, partition=partition)
-    derep_assemblies = []
-    for i in range(len(reps)):
-        # candidates = refine_candidates(
-        #     rep=reps[i],
-        #     subgraph=subgraphs[i],
-        #     threshold=threshold,
-        #     pw=mash_dist,
-        # )
-        can = representative(
-            name=reps[i], graph=subgraphs[i], threshold=threshold, pw=mash_dist
-        )
-
-        candidates = [can.name] + can.selected
-
-        if len(candidates) > 1:
-            for candidate in candidates:
-                derep_assemblies.append(candidate)
+        # Convert pw dist to graph
+        if dashing:
+            log.debug("Generating Dashing graph")
         else:
-            derep_assemblies = candidates
+            log.debug("Generating MASH graph")
+        # mash_dist = mash_dist[(mash_dist.weight >= float(w_filt))]
 
-    derep_assemblies = derep_assemblies + reps + missing + isolated
-    derep_assemblies = list(set(derep_assemblies))
-    reps = reps + missing + isolated
+        G, isolated = create_graph(xash_dist)
+        if G.number_of_edges() == 0:
+            log.debug("Only self loops found")
+            all_assemblies_tmp.loc[:, "representative"] = 1
+            all_assemblies_tmp.loc[:, "derep"] = 1
+            return all_assemblies_tmp
+        if dashing:
+            log.debug("Dashing graph created")
+        else:
+            log.debug("MASH graph created")
+        # TODO: streamline this
+        # G_filt, w_filt = filter_graph(G)
+        # edges2rm = [
+        #     (u, v) for u, v, d in G.edges(data=True) if float(d["weight"]) <= float(w_filt)
+        # ]
+        # G.remove_edges_from(edges2rm)
+        G_filt = G
+        partition = get_communities(G_filt)
 
-    if len(reps) > len(derep_assemblies):
         log.debug(
-            "Less representatives {} than dereplicated assemblies {} !!!".format(
-                len(reps), len(derep_assemblies)
+            "Graph properties: w_filt={} edges={} density={} components={} communities={}".format(
+                w_filt,
+                G_filt.number_of_edges(),
+                nx.density(G_filt),
+                nx.number_connected_components(G_filt),
+                len(set([partition[k] for k in partition])),
             )
         )
-        exit(0)
+        log.debug("Extracting subgraphs")
 
-    # all_assemblies = all_assemblies[
-    #     all_assemblies["assembly"].isin(derep_assemblies)
-    # ]
-    all_assemblies_tmp.loc[:, "representative"] = 0
-    all_assemblies_tmp.loc[
-        all_assemblies_tmp["assembly"].isin(reps), "representative"
-    ] = 1
-    all_assemblies_tmp.loc[:, "derep"] = 0
-    all_assemblies_tmp.loc[
-        all_assemblies_tmp["assembly"].isin(derep_assemblies), "derep"
-    ] = 1
+        rep, reps = get_subgraphs_parallel(
+            graph=G_filt, partition=partition, threads=threads, threshold=threshold
+        )
+
+        derep_assemblies = rep + reps + missing + isolated
+        derep_assemblies = list(set(derep_assemblies))
+
+        rep_list = rep + missing + isolated
+        rep_list = list(set((rep_list)))
+
+        if len(rep_list) > len(derep_assemblies):
+            log.debug(
+                "Less representatives {} than dereplicated assemblies {} !!!".format(
+                    len(rep_list), len(derep_assemblies)
+                )
+            )
+            exit(0)
+
+        all_assemblies_tmp.loc[:, "representative"] = 0
+        all_assemblies_tmp.loc[
+            all_assemblies_tmp["file"].isin(rep_list), "representative"
+        ] = 1
+        all_assemblies_tmp.loc[:, "derep"] = 0
+        all_assemblies_tmp.loc[
+            all_assemblies_tmp["file"].isin(derep_assemblies), "derep"
+        ] = 1
     return all_assemblies_tmp
 
 
@@ -873,10 +1173,12 @@ def dereplicate_ANI(
     threshold,
     chunks,
     slurm_config,
+    slurm_threads,
     tmp_dir,
     max_jobs_array,
     min_genome_size,
     ani_fraglen_fraction,
+    assm_max=10,
 ):
     """
     This function dereplicates genomes by Taxon by:
@@ -890,7 +1192,7 @@ def dereplicate_ANI(
     all_assemblies_tmp = all_assemblies.copy()
     with tempfile.TemporaryDirectory(dir=tmp_dir, prefix="gderep-") as temp_dir:
         failed = None
-        if n_assemblies < 10 or slurm_config is None:
+        if n_assemblies <= 100 or slurm_config is None:
             if (n_assemblies * n_assemblies) < threads:
                 threads = n_assemblies * n_assemblies
             log.debug(
@@ -911,7 +1213,7 @@ def dereplicate_ANI(
                 return None, None, failed, None
 
             ani_results = pairwise_fastANI(
-                assemblies=all_assemblies_tmp["assembly"].tolist(),
+                assemblies=all_assemblies_tmp["file"].tolist(),
                 threads=threads,
                 temp_dir=temp_dir,
                 frag_len=frag_len,
@@ -922,7 +1224,7 @@ def dereplicate_ANI(
             log.debug("Obtained {:,} comparisons".format(pairwise_distances.shape[0]))
         else:
             n = chunks
-            chunks = split_fixed_size(all_assemblies_tmp["assembly"].tolist(), n)
+            chunks = split_fixed_size(all_assemblies_tmp["file"].tolist(), n)
 
             log.debug(
                 "Found {} assemblies, creating {} chunks with {} genomes".format(
@@ -942,18 +1244,19 @@ def dereplicate_ANI(
             # save chunks to disk
             files, wdir = save_chunks_to_disk(chunks, temp_dir)
             # Create fastANI commands
-            cmds, ofiles, odir = create_slurm_commands(files, wdir, frag_len)
+            cmds, ofiles, odir = create_slurm_commands(
+                files, wdir, frag_len, slurm_threads
+            )
             # Run slurm array job
             pairwise_distances = map_slurm_jobs(
                 cmds, slurm_config, odir, max_jobs_array, temp_dir, threads
             )
-            pairwise_distances = concat_df(pairwise_distances)
+            # pairwise_distances = concat_df(pairwise_distances)
             log.debug("Reducing SLURM jobs and processing ANI results")
             # pairwise_distances = reduce_slurm_jobs(ofiles, threads)
 
-        pw = check_pw(
-            pw=pairwise_distances, assms=all_assemblies_tmp["assembly"].tolist()
-        )
+        pairwise_distances = generate_ANI_pairwise(pairwise_distances)
+        pw = check_pw(pw=pairwise_distances, assms=all_assemblies_tmp["file"].tolist())
 
         if pw["failed"]:
             log.debug("Failed. Reason: Assemblies too divergent")
@@ -993,7 +1296,6 @@ def dereplicate_ANI(
                 ],
                 columns=["weight", "communities", "n_genomes", "n_genomes_derep"],
             )
-
             return all_assemblies_tmp, results, failed, None
 
         # TODO: streamline this
@@ -1011,82 +1313,25 @@ def dereplicate_ANI(
             )
         )
         log.debug(
-            "Refining genome selection (length difference and fraction aligned, z-score={})".format(
+            "Refining genome selection (length difference, fraction aligned and ANI difference, z-score={})".format(
                 threshold
             )
         )
 
-        reps, subgraphs = get_reps(graph=G_filt, partition=partition)
-        derep_assemblies = []
-        stats = []
-        for i in range(len(reps)):
-            # candidates = refine_candidates(
-            #     rep=reps[i],
-            #     subgraph=subgraphs[i],
-            #     threshold=threshold,
-            #     pw=pairwise_distances,
-            # )
-            can = representative(
-                name=reps[i],
-                graph=subgraphs[i],
-                threshold=threshold,
-                pw=pairwise_distances,
-            )
-            stats_df = pd.DataFrame(
-                [
-                    (
-                        reps[i],
-                        can.n_nodes,
-                        can.n_nodes_selected,
-                        can.n_nodes_discarded,
-                        can.graph_avg_weight,
-                        can.graph_sd_weight,
-                        can.graph_avg_weight_raw,
-                        can.graph_sd_weight_raw,
-                        can.subgraph_selected_avg_weight,
-                        can.subgraph_selected_sd_weight,
-                        can.subgraph_selected_avg_weight_raw,
-                        can.subgraph_selected_sd_weight_raw,
-                        can.subgraph_discarded_avg_weight,
-                        can.subgraph_discarded_sd_weight,
-                        can.subgraph_discarded_avg_weight_raw,
-                        can.subgraph_discarded_sd_weight_raw,
-                    )
-                ],
-                columns=[
-                    "representative",
-                    "n_nodes",
-                    "n_nodes_selected",
-                    "n_nodes_discarded",
-                    "graph_avg_weight",
-                    "graph_sd_weight",
-                    "graph_avg_weight_raw",
-                    "graph_sd_weight_raw",
-                    "subgraph_selected_avg_weight",
-                    "subgraph_selected_sd_weight",
-                    "subgraph_selected_avg_weight_raw",
-                    "subgraph_selected_sd_weight_raw",
-                    "subgraph_discarded_avg_weight",
-                    "subgraph_discarded_sd_weight",
-                    "subgraph_discarded_avg_weight_raw",
-                    "subgraph_discarded_sd_weight_raw",
-                ],
-            )
+        # reps, subgraphs = get_reps(graph=G_filt, partition=partition)
+        rep, reps, stats_df = get_subgraphs_parallel(
+            graph=G_filt,
+            partition=partition,
+            threshold=threshold,
+            threads=threads,
+            stats=True,
+        )
 
-            stats.append(stats_df)
-            candidates = [can.name] + can.selected
-
-            if len(candidates) > 1:
-                for candidate in candidates:
-                    derep_assemblies.append(candidate)
-            else:
-                derep_assemblies = candidates
-    stats = pd.concat(stats)
-    # derep_assemblies = [item for derep_assemblies in t for item in derep_assemblies]
-    derep_assemblies = derep_assemblies + reps + missing + isolated
-
+    derep_assemblies = rep + reps + missing + isolated
     derep_assemblies = list(set(derep_assemblies))
-    reps = reps + missing + isolated
+
+    rep_list = rep + missing + isolated
+    rep_list = list(set((rep_list)))
 
     log.debug(
         "Keeping {}/{} genomes".format(len(derep_assemblies), len(all_assemblies_tmp))
@@ -1106,113 +1351,25 @@ def dereplicate_ANI(
     if len(reps) > len(derep_assemblies):
         log.debug(
             "Less representatives {} than dereplicated assemblies {} !!!".format(
-                len(reps), len(derep_assemblies)
+                len(rep_list), len(derep_assemblies)
             )
         )
         exit(0)
 
-    rep_keys = all_assemblies_tmp[all_assemblies_tmp["assembly"].isin(reps)][
-        "accession"
-    ].tolist()
+    # rep_keys = all_assemblies_tmp[all_assemblies_tmp["file"].isin(rep_list)][
+    #     "accession"
+    # ].tolist()
 
     # all_assemblies = all_assemblies[
-    #     all_assemblies["assembly"].isin(derep_assemblies)
+    #     all_assemblies["file"].isin(derep_assemblies)
     # ]
     all_assemblies_tmp.loc[:, "representative"] = 0
     all_assemblies_tmp.loc[
-        all_assemblies_tmp["assembly"].isin(reps), "representative"
+        all_assemblies_tmp["file"].isin(rep_list), "representative"
     ] = 1
     all_assemblies_tmp.loc[:, "derep"] = 0
     all_assemblies_tmp.loc[
-        all_assemblies_tmp["assembly"].isin(derep_assemblies), "derep"
+        all_assemblies_tmp["file"].isin(derep_assemblies), "derep"
     ] = 1
 
-    return all_assemblies_tmp, results, failed, stats
-
-
-# def refine_candidates(rep, subgraph, pw, threshold=2.0):
-#     results = []
-#     len_diff = 0
-#     source_len = 0
-#     if subgraph.number_of_edges() == 0:
-#         return [rep]
-#     for reachable_node in nx.all_neighbors(subgraph, rep):
-#         if reachable_node != rep:
-#             idx = pw["target"] == rep
-#             pw.loc[idx, ["source", "target", "source_len", "target_len"]] = pw.loc[
-#                 idx, ["target", "source", "target_len", "source_len"]
-#             ].values
-
-#             df = pw[(pw["source"] == rep) & (pw["target"] == reachable_node)]
-
-#             # Switch column order
-#             # idx = df["target"] == rep
-#             # df.loc[idx, ["source", "target", "source_len", "target_len"]] = df.loc[
-#             #     idx, ["target", "source", "target_len", "source_len"]
-#             # ].values
-
-#             source_len = mean(df.source_len.values)
-#             target_len = mean(df.target_len.values)
-#             len_diff = abs(source_len - target_len)
-#             weight = mean(df.weight.values)
-
-#             if "aln_frac" in df.columns:
-#                 aln_frac = mean(df.aln_frac.values)
-#                 results.append(
-#                     {
-#                         "source": rep,
-#                         "target": reachable_node,
-#                         "weight": float(weight),
-#                         "aln_frac": float(aln_frac),
-#                         "len_diff": int(len_diff),
-#                     }
-#                 )
-#             else:
-#                 results.append(
-#                     {
-#                         "source": rep,
-#                         "target": reachable_node,
-#                         "weight": float(weight),
-#                         "len_diff": int(len_diff),
-#                     }
-#                 )
-#     df = pd.DataFrame(results)
-
-#     if len(df.index) < 2:
-#         if len_diff > 0:
-#             diff_ratio = source_len / len_diff
-#         else:
-#             diff_ratio = 0
-
-#         if diff_ratio >= 0.1:
-#             assms = df["target"].tolist()
-#             assms.append(rep)
-#         else:
-#             assms = [rep]
-#     else:
-#         if "aln_frac" in df.columns:
-#             if is_unique(df["aln_frac"]):
-#                 df["z_score_aln"] = 0
-#             else:
-#                 df["z_score_aln"] = stats.zscore(df["aln_frac"])
-
-#         if is_unique(df["len_diff"]):
-#             df["z_score_diff"] = 0
-#         else:
-#             df["z_score_diff"] = stats.zscore(df["len_diff"])
-
-#         if "aln_frac" in df.columns:
-#             df = df[
-#                 (df["z_score_aln"].abs() >= threshold)
-#                 | (df["z_score_diff"].abs() >= threshold)
-#             ]
-#         else:
-#             df = df[(df["z_score_diff"].abs() >= threshold)]
-
-#         assms = df["target"].tolist()
-#         assms.append(rep)
-
-#     if df.empty:
-#         return [rep]
-#     else:
-#         return assms
+    return all_assemblies_tmp, results, failed, stats_df

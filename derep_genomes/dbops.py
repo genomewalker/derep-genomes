@@ -51,11 +51,11 @@ def create_db_tables(con):
     """
     This function creates the tables needed to stores results and resuming failed jobs or updating new data
     """
-    tax_table = "CREATE TABLE taxa(taxon TEXT PRIMARY KEY)"
-    tax_table_idx = "CREATE INDEX idx_taxa_taxon ON taxa (taxon);"
+    tax_table = "CREATE TABLE taxa(taxonomy TEXT PRIMARY KEY)"
+    tax_table_idx = "CREATE INDEX idx_taxa_taxon ON taxa (taxonomy);"
 
-    genomes_table = "CREATE TABLE genomes(taxon TEXT, accession TEXT PRIMARY KEY)"
-    genomes_table_idx = "CREATE INDEX idx_genomes_taxon ON genomes (taxon);"
+    genomes_table = "CREATE TABLE genomes(taxonomy TEXT, accession TEXT PRIMARY KEY)"
+    genomes_table_idx = "CREATE INDEX idx_genomes_taxon ON genomes (taxonomy);"
 
     genomes_derep_table = (
         "CREATE TABLE genomes_derep(accession TEXT PRIMARY KEY, representative INTEGER)"
@@ -64,19 +64,19 @@ def create_db_tables(con):
         "CREATE INDEX idx_genomes_derep_acc ON genomes_derep (accession);"
     )
 
-    results_table = "CREATE TABLE results(taxon TEXT PRIMARY KEY, weight REAL, communities INTEGER, n_genomes INTEGER, n_genomes_derep INTEGER)"
-    results_table_idx = "CREATE INDEX idx_results_taxon ON results (taxon);"
+    results_table = "CREATE TABLE results(taxonomy TEXT PRIMARY KEY, weight REAL, communities INTEGER, n_genomes INTEGER, n_genomes_derep INTEGER)"
+    results_table_idx = "CREATE INDEX idx_results_taxon ON results (taxonomy);"
 
-    stats_table = "CREATE TABLE stats(taxon TEXT, representative TEXT PRIMARY KEY, n_nodes INTEGER, n_nodes_selected INTEGER, n_nodes_discarded INTEGER, graph_avg_weight REAL, graph_sd_weight REAL, graph_avg_weight_raw REAL, graph_sd_weight_raw REAL, subgraph_selected_avg_weight REAL, subgraph_selected_sd_weight REAL, subgraph_selected_avg_weight_raw REAL, subgraph_selected_sd_weight_raw REAL, subgraph_discarded_avg_weight REAL,subgraph_discarded_sd_weight REAL, subgraph_discarded_avg_weight_raw REAL, subgraph_discarded_sd_weight_raw REAL)"
+    stats_table = "CREATE TABLE stats(taxonomy TEXT, representative TEXT PRIMARY KEY, n_nodes INTEGER, n_nodes_selected INTEGER, n_nodes_discarded INTEGER, graph_avg_weight REAL, graph_sd_weight REAL, graph_avg_weight_raw REAL, graph_sd_weight_raw REAL, subgraph_selected_avg_weight REAL, subgraph_selected_sd_weight REAL, subgraph_selected_avg_weight_raw REAL, subgraph_selected_sd_weight_raw REAL, subgraph_discarded_avg_weight REAL,subgraph_discarded_sd_weight REAL, subgraph_discarded_avg_weight_raw REAL, subgraph_discarded_sd_weight_raw REAL)"
     stats_table_idx = "CREATE INDEX idx_stats_taxon ON stats (representative);"
 
     jobs_done_table = (
-        "CREATE TABLE jobs_done(taxon TEXT, accession TEXT PRIMARY KEY, file TEXT)"
+        "CREATE TABLE jobs_done(taxonomy TEXT, accession TEXT PRIMARY KEY, file TEXT)"
     )
-    jobs_done_table_idx = "CREATE INDEX idx_jobs_done_taxon ON jobs_done (taxon);"
+    jobs_done_table_idx = "CREATE INDEX idx_jobs_done_taxon ON jobs_done (taxonomy);"
 
-    failed_table = "CREATE TABLE jobs_failed(taxon TEXT, accession TEXT PRIMARY KEY, file TEXT, reason TEXT)"
-    failed_table_idx = "CREATE INDEX idx_jobs_failed_taxon ON jobs_failed (taxon);"
+    failed_table = "CREATE TABLE jobs_failed(taxonomy TEXT, accession TEXT PRIMARY KEY, file TEXT, reason TEXT)"
+    failed_table_idx = "CREATE INDEX idx_jobs_failed_taxon ON jobs_failed (taxonomy);"
 
     # Create tables
     con.execute(tax_table)
@@ -133,8 +133,8 @@ def db_insert_taxa(con, taxon):
     """
     Function to insert in the DB the seen taxa
     """
-    # "CREATE TABLE taxa(taxon TEXT PRIMARY KEY)"
-    query = "INSERT INTO taxa (taxon) VALUES (?)"
+    # "CREATE TABLE taxa(taxonomy TEXT PRIMARY KEY)"
+    query = "INSERT INTO taxa (taxonomy) VALUES (?)"
     cursor = con.cursor()
     cursor.execute(query, (taxon,))
 
@@ -143,9 +143,9 @@ def db_insert_genomes(con, taxon, acc2assm):
     """
     Function to insert the genomes seen from each taxa and used for dereplication
     """
-    # "CREATE TABLE genomes(taxon TEXT PRIMARY KEY, accession TEXT)"
+    # "CREATE TABLE genomes(taxonomy TEXT PRIMARY KEY, accession TEXT)"
 
-    query = "INSERT INTO genomes (taxon, accession) VALUES (?, ?)"
+    query = "INSERT INTO genomes (taxonomy, accession) VALUES (?, ?)"
     cursor = con.cursor()
 
     for assembly in acc2assm.keys():
@@ -174,8 +174,8 @@ def db_insert_results(con, taxon, weight, communities, n_genomes, n_genomes_dere
     """
     Function to track the results from the dereplication
     """
-    # "CREATE TABLE results(taxon TEXT PRIMARY KEY, weight REAL, communities INTEGER, n_genomes INTEGER, n_genomes_derep INTEGER)"
-    query = "INSERT INTO results (taxon, weight, communities, n_genomes, n_genomes_derep) VALUES (?, ?, ?, ?, ?)"
+    # "CREATE TABLE results(taxonomy TEXT PRIMARY KEY, weight REAL, communities INTEGER, n_genomes INTEGER, n_genomes_derep INTEGER)"
+    query = "INSERT INTO results (taxonomy, weight, communities, n_genomes, n_genomes_derep) VALUES (?, ?, ?, ?, ?)"
     cursor = con.cursor()
 
     cursor.execute(query, (taxon, weight, communities, n_genomes, n_genomes_derep))
@@ -185,8 +185,8 @@ def db_insert_job_done(con, taxon, acc2assm, assms):
     """
     Function to keep track of the successful jobs and used for resuming a failed job
     """
-    # "CREATE TABLE jobs_done(taxon TEXT, accession TEXT PRIMARY KEY, file TEXT)"
-    query = "INSERT INTO jobs_done (taxon,accession,file) VALUES (?, ?, ?)"
+    # "CREATE TABLE jobs_done(taxonomy TEXT, accession TEXT PRIMARY KEY, file TEXT)"
+    query = "INSERT INTO jobs_done (taxonomy,accession,file) VALUES (?, ?, ?)"
     cursor = con.cursor()
     acc2assm = {k: v for k, v in acc2assm.items() if v in assms}
 
@@ -202,7 +202,7 @@ def check_if_done(con, taxon, acc2assm):
     if not jobs_done.empty and not genomes_done.empty:
         # check that there are no updates
         jobs_done = jobs_done.merge(genomes_done).loc[:, ["accession", "file"]]
-        acc2assm.loc[:, "file"] = acc2assm["assembly"].apply(os.path.basename)
+        # acc2assm.loc[:, "file"] = acc2assm["assembly"].apply(os.path.basename)
 
         needs_update = check_if_updates(
             jobs_done, acc2assm.loc[:, ["accession", "file"]]
@@ -219,12 +219,12 @@ def check_if_done(con, taxon, acc2assm):
     return True
 
 
-def remove_entries(taxon, tables, con):
+def remove_entries(taxonomy, tables, con):
     pass
 
 
 def retrieve_jobs_done(con, taxon):
-    query = "SELECT * from jobs_done where taxon =?"
+    query = "SELECT * from jobs_done WHERE taxonomy =?"
     jobs = pd.read_sql(query, con, params=(taxon,))
 
     if not jobs.empty:
@@ -236,7 +236,7 @@ def retrieve_jobs_done(con, taxon):
 def retrieve_all_jobs_done(con):
     query = "SELECT * from jobs_done"
     jobs = pd.read_sql(query, con)
-
+    
     if not jobs.empty:
         return jobs
     else:
@@ -264,7 +264,7 @@ def retrieve_all_genomes_derep(con):
 
 
 def retrieve_taxa_analyzed(con, taxon):
-    query = "SELECT * from genomes where taxon =?"
+    query = "SELECT * from genomes WHERE taxonomy =?"
     taxons = pd.read_sql(query, con, params=(taxon,))
 
     if not taxons.empty:
@@ -286,9 +286,9 @@ def retrieve_all_taxa_analyzed(con):
 
 
 # def retrieve_taxa_analyzed(con, taxon):
-#     query = "SELECT * from genomes where taxon =?"
+#     query = "SELECT * from genomes WHERE taxonomy =?"
 #     cursor = con.cursor()
-#     cursor.execute(query, (taxon,))
+#     cursor.execute(query, (taxonomy,))
 #     jobs = cursor.fetchall()
 #     if jobs:
 #         accessions = [str(k[1]) for k in jobs]
@@ -298,7 +298,7 @@ def retrieve_all_taxa_analyzed(con):
 
 
 def retrieve_results_done(con, taxon):
-    query = "SELECT * from results where taxon =?"
+    query = "SELECT * from results WHERE taxonomy =?"
     cursor = con.cursor()
     cursor.execute(query, (taxon,))
     jobs = cursor.fetchall()
@@ -329,28 +329,28 @@ def check_done_files_exists(files_done, out_dir):
 
 def delete_from_db(taxons, con):
     # first get accessions from the taxon of interest
-    taxons = taxons["taxon"].tolist()
+    taxons = taxons["taxonomy"].tolist()
 
     placeholders = ", ".join(["?" for _ in taxons])
-    query = "SELECT * FROM jobs_done WHERE taxon in ({});".format(placeholders)
+    query = "SELECT * FROM jobs_done WHERE taxonomy in ({});".format(placeholders)
 
     jobs_done = pd.read_sql_query(query, con, params=(taxons))
 
     cur = con.cursor()
     # Delete from taxa
-    query = "DELETE FROM taxa WHERE taxon in ({});".format(placeholders)
+    query = "DELETE FROM taxa WHERE taxonomy in ({});".format(placeholders)
     cur.execute(query, taxons)
 
     # Delete from jobs_done
-    query = "DELETE FROM jobs_done WHERE taxon in ({});".format(placeholders)
+    query = "DELETE FROM jobs_done WHERE taxonomy in ({});".format(placeholders)
     cur.execute(query, taxons)
 
     # Delete from genomes
-    query = "DELETE FROM genomes WHERE taxon in ({});".format(placeholders)
+    query = "DELETE FROM genomes WHERE taxonomy in ({});".format(placeholders)
     cur.execute(query, taxons)
 
     # Delete from results
-    query = "DELETE FROM results WHERE taxon in ({});".format(placeholders)
+    query = "DELETE FROM results WHERE taxonomy in ({});".format(placeholders)
     cur.execute(query, taxons)
 
     # Delete from genomes_derep
