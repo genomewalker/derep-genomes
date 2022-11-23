@@ -105,9 +105,9 @@ Where:
 
 
 ```bash
-accession       taxonomy        file
-GCF_000566285.1 d__Bacteria;l__Bacteria;k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli       /data/genomes/GCF_000566285.1_genomic.fna.gz
-GCF_003460375.1 d__Bacteria;l__Bacteria;k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli       /data/genomes/GCF_003460375.1_genomic.fna.gz
+accession taxonomy  file
+GCF_000566285.1 d__Bacteria;l__Bacteria;k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli /data/genomes/GCF_000566285.1_genomic.fna.gz
+GCF_003460375.1 d__Bacteria;l__Bacteria;k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli /data/genomes/GCF_003460375.1_genomic.fna.gz
 ```
 
 
