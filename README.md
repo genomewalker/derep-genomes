@@ -91,7 +91,7 @@ SLURM arguments:
 
 DeRepG uses an SQLite3 database to store the results and the different runs, so if it fails or you have a new set of genomes it doesn't need to rerun the whole dereplication.
 
-One limitation of DeRepG is that fastANI might not be fast when one wants to do all-vs-all comparisons in species with a large number of assemblies. In this case, if you don't want to wait for a long time and you have access to a computer cluster using SLURM it will distribute the fastANI comparisons over the cluster. Check the [**SLURM**](#using-derepg-with-slurm) section for more information
+One limitation of DeRepG is that fastANI might not be fast when one wants to do all-vs-all comparisons in species with a large number of assemblies. In this case, if you don't want to wait for a long time and you have access to a computer cluster using SLURM it will distribute the fastANI comparisons over the cluster. Check the [**SLURM**](#using-derepg-with-slurm) section for more information.
 
 One would run DeRepG as:
 
@@ -99,11 +99,17 @@ One would run DeRepG as:
 derepG --data data/genomes --taxa data/bac120_taxonomy_r95-1K.tsv --workers 2 --threads 32 --tmp ./ --db test5k-1.db --copy --out-dir gtdb-derep-1k --slurm-config slurm.yaml
 ```
 
-*--data*: A TSV file Here we specify the location of the genomes in FASTA format (accepts gzipped files)
-> TSV with the following columns: accession,taxonomy,file
+Where:
 
-*--taxa*: A taxa file needs to have two columns like the one distributed by GTDB:
-> d__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Salmonella;s__Salmonella enterica
+*--data*: A TSV file where we specify the location of the genomes in FASTA format (accepts gzipped files). The TSV must have the following columns: `accession,taxonomy,file`
+
+
+```bash
+accession       taxonomy        file
+GCF_000566285.1 d__Bacteria;l__Bacteria;k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli       /data/genomes/GCF_000566285.1_genomic.fna.gz
+GCF_003460375.1 d__Bacteria;l__Bacteria;k__Bacteria;p__Proteobacteria;c__Gammaproteobacteria;o__Enterobacterales;f__Enterobacteriaceae;g__Escherichia;s__Escherichia coli       /data/genomes/GCF_003460375.1_genomic.fna.gz
+```
+
 
 *--workers*: Number of workers to use. This is the number of taxa to process in parallel. If you have a large number of taxa, you might want to increase this number.
 
