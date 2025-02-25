@@ -1,4 +1,6 @@
 """
+Main entry point for the genome dereplication tool.
+
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU
 General Public License as published by the Free Software Foundation, either version 3 of the
 License, or (at your option) any later version.
@@ -11,872 +13,754 @@ You should have received a copy of the GNU General Public License along with thi
 see <https://www.gnu.org/licenses/>.
 """
 
-import subprocess
-import sys
 import os
+import sys
 import shutil
-from derep_genomes.general import (
-    get_arguments,
-    find_assemblies_for_accessions,
-    is_debug,
-)
-from derep_genomes.graph import dereplicate_ANI, dereplicate_xash, concat_df
 import logging
-import pathlib
-import sqlite3
-from derep_genomes.dbops import (
-    check_if_db_exists,
-    check_if_db_empty,
-    create_db_tables,
-    check_db_tables,
-    check_if_done,
-    retrieve_all_taxa_analyzed,
-    retrieve_all_jobs_done,
-    retrieve_all_jobs_failed,
-    delete_from_db,
-    retrieve_all_genomes_derep,
+from pathlib import Path
+from typing import Dict, List, Optional, Any, Union, Set, Tuple
+
+from derep_genomes.config import Config, parse_args
+from derep_genomes.db.duckdb_manager import DuckDBManager
+from derep_genomes.db.schema import create_schema, check_schema
+from derep_genomes.db.operations import DBOperations
+from derep_genomes.utils.logging import (
+    setup_logging,
+    Timer,
+    log_memory_usage,
+    is_debug_enabled,
 )
-from multiprocessing import Pool
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from derep_genomes.utils.parallel import ParallelTaskManager
+from derep_genomes.utils.helpers import split_into_chunks
+from derep_genomes.core.similarity import SimilarityMeasure
 
-from tqdm import tqdm
-from functools import partial
-import pandas as pd
-
-log = logging.getLogger("my_logger")
+# Set up logger
+logger = logging.getLogger("derep_genomes")
 
 
-def process_one_taxon(taxon, parms):
-    classification = parms["classification"]
-    threads = parms["threads"]
-    threshold = parms["threshold"]
-    chunks = parms["chunks"]
-    slurm_config = parms["slurm_config"]
-    slurm_threads = parms["slurm_threads"]
-    tmp_dir = parms["tmp_dir"]
-    max_jobs_array = parms["max_jobs_array"]
-    xash_threshold = parms["xash_threshold"]
-    ani_fraglen_fraction = parms["ani_fraglen_fraction"]
-    min_genome_size = parms["min_genome_size"]
-    failed_df = None
-    dashing = parms["dashing"]
-    assm_max = parms["assm_max"]
-    threads = parms["threads"]
+def setup_run_directories(config: Config) -> Dict[str, Path]:
+    """
+    Create and setup directories for the current run.
 
-    log.debug("Dereplicating {}".format(taxon))
-    classification = classification[classification["taxonomy"] == taxon]
-    acc_to_assemblies = classification.loc[:, ["accession", "file"]]
-    n_assemblies = classification.shape[0]
-    # check if already processed
+    Args:
+        config: Configuration object
 
-    if n_assemblies == 0:
-        return
-    else:
-        log.debug(
-            "{:,} assemblies for this species, clustering to dereplicate.".format(
-                n_assemblies
-            )
-        )
-        if dashing:
-            log.debug("Preclustering with Dashing...")
-        else:
-            log.debug("Preclustering with Mash...")
+    Returns:
+        Dictionary of directory paths
+    """
+    # Create base run directory with timestamp
+    base_dir = (
+        Path(config.out_dir if config.out_dir else ".")
+        / f"derep_run_{config.timestamp}"
+    )
 
-        acc_to_assemblies_xash = dereplicate_xash(
-            all_assemblies=acc_to_assemblies,
-            threads=threads,
-            tmp_dir=tmp_dir,
-            xash_threshold=xash_threshold,
-            threshold=threshold,
-            dashing=dashing,
-        )
-        acc_to_assemblies_xash_r = acc_to_assemblies_xash[
-            acc_to_assemblies_xash["representative"] == 1
-        ].copy()
-        acc_to_assemblies_xash_d = acc_to_assemblies_xash[
-            acc_to_assemblies_xash["derep"] == 1
-        ].copy()
-        acc_to_assemblies_xash_o = acc_to_assemblies_xash[
-            acc_to_assemblies_xash["derep"] == 0
-        ].copy()
+    # Create directory structure
+    dirs = {
+        "base": base_dir,
+        "temp": base_dir / "temp",
+        "results": base_dir / "results",
+        "logs": base_dir / "logs",
+        "reps": base_dir / "representatives" if config.copy else None,
+    }
 
-        if dashing:
-            log.debug(
-                "Identified {:,} linked assemblies in {:,} Dashing communities".format(
-                    acc_to_assemblies_xash_d.shape[0], acc_to_assemblies_xash_r.shape[0]
-                )
-            )
-        else:
-            log.debug(
-                "Identified {:,} linked assemblies in {:,} MASH communities".format(
-                    acc_to_assemblies_xash_d.shape[0], acc_to_assemblies_xash_r.shape[0]
-                )
-            )
+    # Create directories
+    for name, path in dirs.items():
+        if path:
+            os.makedirs(path, exist_ok=True)
+            logger.debug(f"Created directory: {path}")
 
-        # We refine each MASH community
-        if dashing:
-            log.debug(
-                "Refining {:,} Dashing selected assemblies".format(
-                    acc_to_assemblies_xash_d.shape[0]
-                )
-            )
-        else:
-            log.debug(
-                "Refining {:,} MASH communities".format(
-                    acc_to_assemblies_xash_r.shape[0]
-                )
-            )
-        derep_assemblies, results, failed, stats_df = dereplicate_ANI(
-            all_assemblies=acc_to_assemblies_xash_d,
-            threads=threads,
-            threshold=threshold,
-            chunks=chunks,
-            slurm_config=slurm_config,
-            slurm_threads=slurm_threads,
-            tmp_dir=tmp_dir,
-            max_jobs_array=max_jobs_array,
-            min_genome_size=min_genome_size,
-            ani_fraglen_fraction=ani_fraglen_fraction,
-            assm_max=assm_max,
-        )
+    # Set output paths in config
+    config.results_dir = str(dirs["results"])
+    config.temp_dir = str(dirs["temp"])
+    if config.copy:
+        config.rep_out_dir = str(dirs["reps"])
 
-        if failed is not None:
-            failed_df = acc_to_assemblies.copy()
-            failed_df.loc[:, "file"] = failed_df["file"]
-            failed_df.loc[:, "taxonomy"] = taxon
-            failed_df.loc[:, "reason"] = failed
-            failed_df = failed_df[["taxonomy", "accession", "file", "reason"]]
-        else:
-            failed_df = pd.DataFrame()
-            # Add taxa to taxa table
-            derep_assemblies = concat_df([derep_assemblies, acc_to_assemblies_xash_o])
-            derep_assemblies.loc[:, "taxonomy"] = taxon
-            results.loc[:, "taxonomy"] = taxon
-            if stats_df is not None:
-                stats_df.loc[:, "taxonomy"] = taxon
-            else:
-                stats_df = pd.DataFrame()
+    # Update log file location if not explicitly set
+    if not config.log_file:
+        config.log_file = str(dirs["logs"] / f"derep_{config.timestamp}.log")
+        # Re-setup logging with file
+        from derep_genomes.utils.logging import setup_logging
 
-        return derep_assemblies, results, failed_df, stats_df
+        log_level = logging.DEBUG if config.debug else logging.INFO
+        setup_logging(log_level=log_level, log_file=config.log_file)
+
+    return dirs
 
 
-def insert_to_db(
-    derep_assemblies, results, failed, stats_df, con, threads, out_dir, copy
-):
-    if not derep_assemblies.empty:
-        query = check_existing(
-            df=derep_assemblies.loc[:, ["taxonomy"]].drop_duplicates(),
-            columns=["taxonomy"],
-            table="taxa",
-            con=con,
-        )
-        insert_pd_sql(query=query, table="taxa", con=con)
+def sanitize_for_filename(text: str) -> str:
+    """
+    Sanitize a string to make it safe for use in a filename.
 
-        # Add genomes to genome table
-        query = check_existing(
-            df=derep_assemblies.loc[:, ["taxonomy", "accession"]],
-            columns=["taxonomy", "accession"],
-            table="genomes",
-            con=con,
-        )
-        genomes = insert_pd_sql(query=query, table="genomes", con=con)
+    Args:
+        text: Input string
 
-        # Add derep genomes to derep genome table
-        query = check_existing(
-            df=derep_assemblies[derep_assemblies["derep"] == 1]
-            .loc[:, ["accession", "representative"]]
-            .copy(),
-            columns=["accession", "representative"],
-            table="genomes_derep",
-            con=con,
-        )
-        genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
+    Returns:
+        Sanitized string
+    """
+    # Replace problematic characters
+    replacements = {
+        ";": "_",
+        " ": "_",
+        ":": "_",
+        "/": "_",
+        "\\": "_",
+        "*": "_",
+        "?": "_",
+        '"': "_",
+        "<": "_",
+        ">": "_",
+        "|": "_",
+    }
 
-    if not results.empty:
-        # Add results to results table
-        query = check_existing(
-            results.loc[
-                :, ["taxonomy", "weight", "communities", "n_genomes", "n_genomes_derep"]
-            ],
-            columns=[
-                "taxonomy",
-                "weight",
-                "communities",
-                "n_genomes",
-                "n_genomes_derep",
-            ],
-            table="results",
-            con=con,
-        )
-        results_db = insert_pd_sql(query=query, table="results", con=con)
+    for char, replacement in replacements.items():
+        text = text.replace(char, replacement)
 
-    if not stats_df.empty:
-        # Add results to results table
-        query = check_existing(
-            stats_df.loc[
-                :,
-                [
-                    "taxonomy",
-                    "representative",
-                    "n_nodes",
-                    "n_nodes_selected",
-                    "n_nodes_discarded",
-                    "graph_avg_weight",
-                    "graph_sd_weight",
-                    "graph_avg_weight_raw",
-                    "graph_sd_weight_raw",
-                    "subgraph_selected_avg_weight",
-                    "subgraph_selected_sd_weight",
-                    "subgraph_selected_avg_weight_raw",
-                    "subgraph_selected_sd_weight_raw",
-                    "subgraph_discarded_avg_weight",
-                    "subgraph_discarded_sd_weight",
-                    "subgraph_discarded_avg_weight_raw",
-                    "subgraph_discarded_sd_weight_raw",
-                ],
-            ],
-            columns=[
-                "taxonomy",
-                "representative",
-                "n_nodes",
-                "n_nodes_selected",
-                "n_nodes_discarded",
-                "graph_avg_weight",
-                "graph_sd_weight",
-                "graph_avg_weight_raw",
-                "graph_sd_weight_raw",
-                "subgraph_selected_avg_weight",
-                "subgraph_selected_sd_weight",
-                "subgraph_selected_avg_weight_raw",
-                "subgraph_selected_sd_weight_raw",
-                "subgraph_discarded_avg_weight",
-                "subgraph_discarded_sd_weight",
-                "subgraph_discarded_avg_weight_raw",
-                "subgraph_discarded_sd_weight_raw",
-            ],
-            table="stats",
-            con=con,
-        )
+    return text
 
-        stats_db = insert_pd_sql(query=query, table="stats", con=con)
 
-    if not derep_assemblies.empty and not results.empty:
-        # Add jobs done to table
-        query = check_existing(
-            derep_assemblies.loc[:, ["taxonomy", "accession", "file"]],
-            columns=["taxonomy", "accession", "file"],
-            table="jobs_done",
-            con=con,
-        )
-        jobs_done_db = insert_pd_sql(query=query, table="jobs_done", con=con)
+def load_taxa_from_file(file_path: str) -> List[str]:
+    """
+    Load taxa from a file.
 
-    # Add failed jobs to table
-    if not failed.empty:
-        query = check_existing(
-            failed.loc[:, ["taxonomy", "accession", "file", "reason"]],
-            columns=["taxonomy", "accession", "file", "reason"],
-            table="jobs_failed",
-            con=con,
-        )
-        insert_pd_sql(query=query, table="jobs_failed", con=con)
+    Args:
+        file_path: Path to taxa file
 
-        query = check_existing(
-            df=failed.loc[:, ["taxonomy"]].drop_duplicates(),
-            columns=["taxonomy"],
-            table="taxa",
-            con=con,
-        )
-        insert_pd_sql(query=query, table="taxa", con=con)
-
-        query = check_existing(
-            failed.loc[:, ["taxonomy", "accession", "file"]],
-            columns=["taxonomy", "accession", "file"],
-            table="jobs_done",
-            con=con,
-        )
-        insert_pd_sql(query=query, table="jobs_done", con=con)
+    Returns:
+        List of taxa
+    """
+    taxa = []
 
     try:
-        con.commit()
-    except:
-        con.rollback()
+        with open(file_path, "r") as f:
+            for line in f:
+                taxa.append(line.strip())
+    except Exception as e:
+        logger.error(f"Error loading taxa from {file_path}: {e}")
+        sys.exit(1)
+
+    return taxa
 
 
-def copy_files(src_dst):
-    log.debug("{} -> {}".format(src_dst[0], src_dst[1]))
-    shutil.copy(src_dst[0], src_dst[1])
+def load_genome_data(file_path: str) -> List[Dict[str, Any]]:
+    """
+    Load genome data from a TSV file.
 
+    Args:
+        file_path: Path to genome data file
 
-def symlink_files(src, dst):
-    os.symlink(src, os.path.join(dst, os.path.basename(src)))
-
-
-def check_existing(df, columns, table, con):
-    query = "SELECT " + ",".join(columns) + " from " + table
-    old = pd.read_sql_query(query, con)
-    new = df.loc[:, columns]
-    old = old.loc[:, columns]
-    if old.empty:
-        return new
-    else:
-        return new.loc[~new.isin(old).all(1)]
-
-
-def insert_pd_sql(query, table, con):
-    if query.empty:
-        log.debug("All entries in table {} already present".format(table))
-    else:
-        log.debug("Adding {} entries in table {}".format(query.shape[0], table))
-        query.to_sql(name=table, con=con, if_exists="append", index=False)
-
-
-def process_sigletons(singletons, out_dir, threads, con, copy):
-
-    # Insert data to table taxa
-    query = check_existing(singletons, columns=["taxonomy"], table="taxa", con=con)
-    insert_pd_sql(query=query, table="taxa", con=con)
-
-    # Insert data to table genomes
-    query = check_existing(
-        singletons, columns=["taxonomy", "accession"], table="genomes", con=con
-    )
-    genomes = insert_pd_sql(query=query, table="genomes", con=con)
-
-    # Insert data to table genomes_derep
-    singletons.loc[:, "representative"] = int(1)
-
-    query = check_existing(
-        singletons,
-        columns=["accession", "representative"],
-        table="genomes_derep",
-        con=con,
-    )
-    genomes_derep = insert_pd_sql(query=query, table="genomes_derep", con=con)
-
-    # Insert data to table results
-    singletons.loc[:, "weight"] = None
-    singletons.loc[:, "communities"] = int(1)
-    singletons.loc[:, "n_genomes"] = 1
-    singletons.loc[:, "n_genomes_derep"] = 1
-
-    query = check_existing(
-        singletons,
-        columns=["taxonomy", "weight", "communities", "n_genomes", "n_genomes_derep"],
-        table="results",
-        con=con,
-    )
-    results = insert_pd_sql(query=query, table="results", con=con)
-    # Insert data to table jobs_done
-    # singletons.loc[:, "file"] = singletons["assembly"].apply(
-    #     lambda x: os.path.basename(x)
-    # )
-    query = check_existing(
-        singletons,
-        columns=["taxonomy", "accession", "file"],
-        table="jobs_done",
-        con=con,
-    )
-    jobs_done = insert_pd_sql(query=query, table="jobs_done", con=con)
+    Returns:
+        List of genome dictionaries
+    """
+    genomes = []
 
     try:
-        con.commit()
-    except:
-        pass
+        with open(file_path, "r") as f:
+            # Skip header if present
+            header = f.readline().strip().split("\t")
+
+            # Check if header contains expected columns
+            if len(header) < 2 or "accession" not in header and "file" not in header:
+                # No header, reset file pointer
+                f.seek(0)
+                header = ["accession", "taxonomy", "file"]
+
+            # Get column indices
+            acc_idx = header.index("accession") if "accession" in header else 0
+            tax_idx = header.index("taxonomy") if "taxonomy" in header else 1
+            file_idx = header.index("file") if "file" in header else 2
+
+            # Read data
+            for line in f:
+                fields = line.strip().split("\t")
+
+                if len(fields) <= max(acc_idx, tax_idx, file_idx):
+                    logger.warning(f"Skipping invalid line: {line.strip()}")
+                    continue
+
+                genome = {
+                    "accession": fields[acc_idx],
+                    "taxonomy": fields[tax_idx],
+                    "file": fields[file_idx],
+                }
+
+                genomes.append(genome)
+    except Exception as e:
+        logger.error(f"Error loading genome data from {file_path}: {e}")
+        sys.exit(1)
+
+    return genomes
 
 
-def find_assemblies(x, classifications, all_assm):
-    accessions = sorted(classifications[x])
-    log.debug(x)
-    log.debug(accessions[0])
-    res = find_assemblies_for_accessions(accessions=accessions, all_assemblies=all_assm)
-    return res
+def filter_by_taxa(
+    genomes: List[Dict[str, Any]], taxa: List[str]
+) -> List[Dict[str, Any]]:
+    """
+    Filter genomes by taxa.
+
+    Args:
+        genomes: List of genome dictionaries
+        taxa: List of taxa to keep
+
+    Returns:
+        Filtered list of genome dictionaries
+    """
+    return [genome for genome in genomes if genome["taxonomy"] in taxa]
 
 
-# TODO: Improve the matching between filenames and accessions
-def shorten_accession(accession):
-    if accession.startswith("GCF_") or accession.startswith("GCA_"):
-        accession = accession.split(".")[0]
-        assert len(accession) == 13
-    else:
-        accession = accession
-    return accession
+def check_files_exist(genomes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Check if genome files exist and filter out those that don't.
+
+    Args:
+        genomes: List of genome dictionaries
+
+    Returns:
+        Filtered list of genome dictionaries
+    """
+    valid_genomes = []
+
+    for genome in genomes:
+        if os.path.isfile(genome["file"]):
+            valid_genomes.append(genome)
+        else:
+            logger.warning(
+                f"File not found: {genome['file']} for accession {genome['accession']}"
+            )
+
+    return valid_genomes
 
 
-def get_accession(assembly):
-    res = {}
-    accession = os.path.basename(assembly)
-    accession = shorten_accession(accession)
-    res = {"accession_nover": accession, "assembly": assembly}
-    return res
+def group_by_taxonomy(genomes: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Group genomes by taxonomy.
+
+    Args:
+        genomes: List of genome dictionaries
+
+    Returns:
+        Dictionary of taxonomy to list of genome dictionaries
+    """
+    taxonomy_groups = {}
+
+    for genome in genomes:
+        taxonomy = genome["taxonomy"]
+        if taxonomy not in taxonomy_groups:
+            taxonomy_groups[taxonomy] = []
+        taxonomy_groups[taxonomy].append(genome)
+
+    return taxonomy_groups
 
 
-def check_done(data, con):
-    df = check_existing(
-        data, columns=["taxonomy", "accession", "file"], table="jobs_done", con=con
-    )
-    return df
+def get_similarity_measure(config: Config, temp_dir: Path) -> SimilarityMeasure:
+    """
+    Get appropriate similarity measure based on configuration.
+
+    Args:
+        config: Configuration object
+        temp_dir: Temporary directory
+
+    Returns:
+        Similarity measure instance
+    """
+    if config.similarity_method == "skani":
+        from derep_genomes.core.skani import SKANI
+
+        return SKANI(
+            threads=config.threads,
+            threshold=config.threshold,
+            temp_dir=temp_dir,
+            skani_k=config.skani_k,
+            skani_s=config.skani_s,
+            skani_min_conf=config.skani_min_conf,
+            skani_target_ani=config.skani_target_ani,
+            skani_min_kmers=config.skani_min_kmers,
+        )
+    else:  # default to FastANI
+        from derep_genomes.core.ani import FastANI
+
+        return FastANI(
+            threads=config.threads,
+            threshold=config.threshold,
+            temp_dir=temp_dir,
+            ani_fraglen=config.ani_fraglen,
+            ani_fraglen_fraction=config.ani_fraglen_fraction,
+            ani_min_frac=config.ani_min_frac,
+            ani_threshold=config.ani_threshold,
+            min_genome_size=config.min_genome_size,
+        )
 
 
-def check_done_apply(df, parms):
-    db = parms["db"]
-    con = sqlite3.connect(db, isolation_level="EXCLUSIVE")
-    taxon = list(set(df["taxonomy"]))[0]
-    acc_to_assemblies = df.loc[:, ["accession", "file"]]
-    is_done = check_if_done(con=con, taxon=taxon, acc2assm=acc_to_assemblies)
+def get_precluster_similarity_measure(
+    config: Config, temp_dir: Path
+) -> SimilarityMeasure:
+    """
+    Get appropriate pre-clustering similarity measure based on configuration.
 
-    con.close()
-    return is_done
+    Args:
+        config: Configuration object
+        temp_dir: Temporary directory
+
+    Returns:
+        Similarity measure instance
+    """
+    if config.dashing:
+        from derep_genomes.core.dashing import Dashing
+
+        return Dashing(
+            threads=config.threads,
+            threshold=config.threshold,
+            temp_dir=temp_dir,
+            dashing_k=config.dashing_k,
+            dashing_s=config.dashing_s,
+            dashing_threshold=config.dashing_threshold,
+        )
+    else:  # default to Mash
+        from derep_genomes.core.mash import Mash
+
+        return Mash(
+            threads=config.threads,
+            threshold=config.threshold,
+            temp_dir=temp_dir,
+            mash_k=config.mash_k,
+            mash_s=config.mash_s,
+            mash_threshold=config.mash_threshold,
+        )
 
 
-def command_exists(command):
+def process_taxon(
+    taxon: str, genomes: List[Dict[str, Any]], config: Config, db_ops: DBOperations
+) -> Dict[str, Any]:
+    """
+    Process a single taxon.
+
+    Args:
+        taxon: Taxonomy name
+        genomes: List of genome dictionaries for this taxon
+        config: Configuration object
+        db_ops: Database operations
+
+    Returns:
+        Processing results
+    """
+    logger.info(f"Processing taxon: {taxon} with {len(genomes)} genomes")
+
+    # Skip if already processed
+    if db_ops.has_taxon_been_processed(taxon):
+        logger.info(f"Taxon {taxon} already processed, skipping")
+        return {"taxonomy": taxon, "status": "skipped", "n_genomes": len(genomes)}
+
+    # If singleton taxon, mark all genomes as representatives
+    if len(genomes) == 1:
+        logger.info(f"Taxon {taxon} has only one genome, marking as representative")
+
+        # Insert into database
+        db_ops.insert_taxon(taxon, 1)
+        db_ops.insert_genomes(genomes)
+
+        derep_genome = {
+            "accession": genomes[0]["accession"],
+            "representative": True,
+            "derep": True,
+        }
+
+        db_ops.insert_derep_genomes([derep_genome])
+
+        result = {
+            "taxonomy": taxon,
+            "weight": None,
+            "communities": 1,
+            "n_genomes": 1,
+            "n_genomes_derep": 1,
+            "method": config.similarity_method,
+        }
+
+        db_ops.insert_results(result)
+
+        for genome in genomes:
+            db_ops.insert_job_done(
+                {
+                    "taxonomy": taxon,
+                    "accession": genome["accession"],
+                    "file": genome["file"],
+                }
+            )
+
+        return {
+            "taxonomy": taxon,
+            "status": "singleton",
+            "n_genomes": 1,
+            "representatives": [genomes[0]["file"]],
+        }
+
+    # Create temporary directory with sanitized taxon name
+    safe_taxon = sanitize_for_filename(taxon)
+    temp_dir = Path(config.tmp_dir) / f"derep-{safe_taxon}-{config.timestamp}"
+    os.makedirs(temp_dir, exist_ok=True)
+
     try:
-        fnull = open(os.devnull, "w")
-        subprocess.call([command], stdout=fnull, stderr=subprocess.STDOUT)
-        return True
-    except OSError:
-        return False
+        # Extract assembly file paths
+        assembly_files = [genome["file"] for genome in genomes]
+
+        # Prefetch genome lengths for all assembly files at the beginning
+        from derep_genomes.utils.helpers import genome_length_cache
+
+        genome_length_cache.prefetch(assembly_files)
+
+        # First stage: Pre-clustering with Mash or Dashing
+        logger.info(
+            f"Performing pre-clustering with {'Dashing' if config.dashing else 'Mash'}"
+        )
+
+        # Get pre-clustering similarity measure
+        precluster_measure = get_precluster_similarity_measure(config, temp_dir)
+
+        with Timer(f"Pre-clustering for {taxon}"):
+            precluster_data = precluster_measure.compute_pairwise(assembly_files)
+            filtered_precluster_data = precluster_measure.filter_by_similarity(
+                precluster_data
+            )
+
+            # Check for missing assemblies (too divergent)
+            missing_assemblies = precluster_measure.check_missing_assemblies(
+                filtered_precluster_data, assembly_files
+            )
+
+            # Create graph for pre-clustered data
+            precluster_graph = precluster_measure.create_similarity_graph(
+                filtered_precluster_data
+            )
+
+        # Find connected components in pre-clustering graph
+        from networkx import connected_components
+        import networkx as nx
+
+        # Group assemblies by connected component
+        clusters = []
+        for component in connected_components(precluster_graph):
+            if len(component) > 0:
+                clusters.append(list(component))
+
+        logger.info(f"Pre-clustering identified {len(clusters)} clusters")
+
+        # Second stage: Detailed similarity analysis within each cluster
+        final_representatives = []
+
+        for i, cluster in enumerate(clusters):
+            if len(cluster) == 1:
+                # Single assembly in cluster, add as representative
+                final_representatives.extend(cluster)
+                continue
+
+            logger.info(
+                f"Processing cluster {i+1}/{len(clusters)} with {len(cluster)} genomes"
+            )
+
+            # Get appropriate similarity measure for detailed analysis
+            similarity_measure = get_similarity_measure(config, temp_dir)
+
+            with Timer(f"Similarity calculation for cluster {i+1}"):
+                similarity_data = similarity_measure.compute_pairwise(cluster)
+                filtered_data = similarity_measure.filter_by_similarity(similarity_data)
+
+                # Create graph and find representative
+                from derep_genomes.core.graph import find_clusters
+
+                graph = similarity_measure.create_similarity_graph(filtered_data)
+                cluster_results = find_clusters(graph, threshold=config.threshold)
+
+                # Add representatives from this cluster
+                final_representatives.extend(cluster_results["representatives"])
+
+        # Add missing assemblies (too divergent) as representatives
+        final_representatives.extend(missing_assemblies)
+
+        # Remove duplicates
+        final_representatives = list(set(final_representatives))
+
+        # Create results
+        logger.info(
+            f"Found {len(final_representatives)} representatives out of {len(genomes)} genomes"
+        )
+
+        # Insert into database
+        db_ops.insert_taxon(taxon, len(genomes))
+        db_ops.insert_genomes(genomes)
+
+        # Insert dereplicated genomes
+        derep_genomes = []
+        for genome in genomes:
+            is_rep = genome["file"] in final_representatives
+
+            derep_genomes.append(
+                {
+                    "accession": genome["accession"],
+                    "representative": is_rep,
+                    "derep": True,  # All are part of the dereplicated set
+                }
+            )
+
+        db_ops.insert_derep_genomes(derep_genomes)
+
+        # Insert results
+        result = {
+            "taxonomy": taxon,
+            "weight": None,  # Not applicable with two-stage approach
+            "communities": len(clusters),
+            "n_genomes": len(genomes),
+            "n_genomes_derep": len(final_representatives),
+            "method": f"{'dashing' if config.dashing else 'mash'}+{config.similarity_method}",
+        }
+
+        db_ops.insert_results(result)
+
+        # Insert jobs done
+        for genome in genomes:
+            db_ops.insert_job_done(
+                {
+                    "taxonomy": taxon,
+                    "accession": genome["accession"],
+                    "file": genome["file"],
+                }
+            )
+
+        # Get memory usage statistics
+        if is_debug_enabled():
+            log_memory_usage(f"Memory usage after processing {taxon}")
+            logger.debug(
+                f"Genome length cache stats: {genome_length_cache.get_stats()}"
+            )
+
+        # Clean up
+        logger.debug(f"Cleaning up temporary directory: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return {
+            "taxonomy": taxon,
+            "status": "success",
+            "n_genomes": len(genomes),
+            "n_representatives": len(final_representatives),
+            "representatives": final_representatives,
+        }
+
+    except Exception as e:
+        logger.error(f"Error processing taxon {taxon}: {e}")
+
+        # Mark job as failed
+        for genome in genomes:
+            db_ops.insert_job_failed(
+                {
+                    "taxonomy": taxon,
+                    "accession": genome["accession"],
+                    "file": genome["file"],
+                    "reason": str(e),
+                }
+            )
+
+        # Clean up
+        logger.debug(f"Cleaning up temporary directory: {temp_dir}")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+        return {
+            "taxonomy": taxon,
+            "status": "failed",
+            "n_genomes": len(genomes),
+            "error": str(e),
+        }
 
 
-def mute():
-    sys.stdout = open(os.devnull, "w")
+def copy_representative_files(
+    results: List[Dict[str, Any]], genomes: List[Dict[str, Any]], out_dir: str
+) -> None:
+    """
+    Copy representative genome files to output directory.
+
+    Args:
+        results: List of processing results
+        genomes: List of all genome dictionaries
+        out_dir: Output directory
+    """
+    # Create output directory if it doesn't exist
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Create lookup for genomes by file path
+    genome_lookup = {genome["file"]: genome for genome in genomes}
+
+    # Collect all representative files
+    rep_files = []
+    for result in results:
+        if result.get("status") == "success" or result.get("status") == "singleton":
+            rep_files.extend(result.get("representatives", []))
+
+    # Copy files
+    logger.info(f"Copying {len(rep_files)} representative genomes to {out_dir}")
+
+    with Timer("Copying representative files"):
+        for file_path in rep_files:
+            try:
+                # Get genome info
+                genome = genome_lookup.get(file_path)
+                if not genome:
+                    logger.warning(f"No genome info found for file: {file_path}")
+                    continue
+
+                # Get destination path
+                dest_path = os.path.join(out_dir, os.path.basename(file_path))
+
+                # Copy file
+                shutil.copy2(file_path, dest_path)
+                logger.debug(f"Copied {file_path} to {dest_path}")
+
+            except Exception as e:
+                logger.error(f"Error copying file {file_path}: {e}")
 
 
-def file_exists(file):
-    return os.path.isfile(file)
+def save_results_to_tsv(
+    results: List[Dict[str, Any]], genomes: List[Dict[str, Any]], output_file: str
+) -> None:
+    """
+    Save processing results to a TSV file.
+
+    Args:
+        results: List of processing results
+        genomes: List of all genome dictionaries
+        output_file: Output file path
+    """
+    # Create lookup for representative status
+    rep_lookup = {}
+    for result in results:
+        if result.get("status") in ("success", "singleton"):
+            for rep_file in result.get("representatives", []):
+                rep_lookup[rep_file] = True
+
+    # Create output rows
+    rows = []
+    for genome in genomes:
+        row = {
+            "taxonomy": genome["taxonomy"],
+            "accession": genome["accession"],
+            "file": genome["file"],
+            "representative": rep_lookup.get(genome["file"], False),
+        }
+        rows.append(row)
+
+    # Write to file
+    with open(output_file, "w") as f:
+        # Write header
+        f.write("taxonomy\taccession\tfile\trepresentative\n")
+
+        # Write rows
+        for row in rows:
+            f.write(
+                f"{row['taxonomy']}\t{row['accession']}\t{row['file']}\t{1 if row['representative'] else 0}\n"
+            )
+
+    logger.info(f"Results saved to {output_file}")
 
 
 def main():
+    """Main entry point."""
+    # Parse command line arguments
+    args = parse_args()
 
-    logging.basicConfig(
-        level=logging.DEBUG,
-        format="%(levelname)s ::: %(asctime)s ::: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    # Create configuration
+    config = Config.from_args(args)
+
+    # Initial logging setup (will be updated later with file)
+    from derep_genomes.utils.logging import (
+        setup_logging,
+        is_debug_enabled,
+        log_memory_usage,
     )
 
-    args = get_arguments()
-    logging.getLogger("my_logger").setLevel(
-        logging.DEBUG if args.debug else logging.INFO
-    )
-    prefix = args.prefix
+    log_level = logging.DEBUG if config.debug else logging.INFO
+    setup_logging(log_level=log_level)
 
-    # test if binaries for fastani and mash exists
-    # check if command exists
-    if not command_exists("fastANI"):
-        log.error("fastANI not found in PATH")
-        sys.exit(1)
-    if not command_exists("mash"):
-        log.error("mash not found in PATH")
-        sys.exit(1)
-    if not command_exists("dashing"):
-        log.error("dashing not found in PATH")
-        sys.exit(1)
-    if args.dashing:
-        log.debug("Using dashing")
-    else:
-        log.debug("Using mash")
+    logger.info(f"Starting genome dereplication with {config.similarity_method}")
+    logger.info(str(config))
 
-    if args.copy:
-        out_dir = pathlib.Path(args.out_dir).absolute()
-        os.makedirs(out_dir, exist_ok=True)
+    # Setup run directories
+    dirs = setup_run_directories(config)
 
-    tmp_dir = pathlib.Path(args.tmp_dir).absolute()
-    if not os.path.isdir(tmp_dir):
-        os.makedirs(tmp_dir, exist_ok=True)
+    # Save configuration
+    config_file = dirs["results"] / "config.yaml"
+    config.save(str(config_file))
+    logger.info(f"Configuration saved to {config_file}")
 
-    con = check_if_db_exists(args.db)
-    db_empty = check_if_db_empty(con)
+    # Initialize database
+    db_path = dirs["results"] / f"derep-genomes_{config.timestamp}.db"
+    config.db_path = str(db_path)  # Update config with actual path
 
-    if db_empty:
-        log.info("Creating db tables")
-        create_db_tables(con)
-    else:
-        log.info("Checking correct tables exist")
-        check_db_tables(con)
+    with DuckDBManager(config.db_path) as db:
+        # Check or create schema
+        if not check_schema(db):
+            logger.info("Creating database schema")
+            create_schema(db)
 
-    # Get all assemblies
-    log.info("Reading genome data")
-    assm_data = pd.read_csv(args.tax_file, sep="\t")
-    log.info("Found {:,} assemblies".format(assm_data.shape[0]))
-    # Check if all files are present
-    log.info("Checking if all files are present")
+        # Create database operations
+        db_ops = DBOperations(db)
 
-    p = Pool(processes=args.threads)
-    file_list = assm_data["file"].tolist()
+        # Load genome data
+        logger.info(f"Loading genome data from {config.tax_file}")
+        genomes = load_genome_data(config.tax_file)
+        logger.info(f"Loaded {len(genomes)} genomes")
 
-    file_list = list(
-        tqdm(
-            p.imap(os.path.isfile, file_list),
-            total=len(file_list),
-            leave=False,
-            ncols=80,
-            desc="Files processed",
-        )
-    )
-    p.close()
-    p.join()
-
-    assm_data["file_exists"] = file_list
-    p.close()
-    p.join()
-
-    # remove files that are not present
-    pre_filt_assm = assm_data.shape[0]
-    assm_data = assm_data[assm_data["file_exists"] == True]
-    if pre_filt_assm != assm_data.shape[0]:
-        log.info(
-            "Removed {:,} assemblies that are not present".format(
-                pre_filt_assm - assm_data.shape[0]
+        # Filter by selected taxa if provided
+        if config.selected_taxa:
+            logger.info(f"Filtering by selected taxa from {config.selected_taxa}")
+            selected_taxa = load_taxa_from_file(config.selected_taxa)
+            genomes = filter_by_taxa(genomes, selected_taxa)
+            logger.info(
+                f"Filtered to {len(genomes)} genomes in {len(selected_taxa)} taxa"
             )
-        )
-    else:
-        log.info("All files are present")
 
-    if args.selected_taxa:
-        with args.selected_taxa as f:
-            taxas = [line.rstrip() for line in f]
-        assm_data = assm_data[assm_data["taxonomy"].isin(taxas)]
+        # Check if files exist
+        logger.info("Checking if genome files exist")
+        genomes = check_files_exist(genomes)
+        logger.info(f"Found {len(genomes)} existing genome files")
 
-    taxa_in_db = retrieve_all_taxa_analyzed(con)
-    jobs_done = retrieve_all_jobs_done(con)
-    jobs_done_old = jobs_done.copy()
+        # Group by taxonomy
+        taxonomy_groups = group_by_taxonomy(genomes)
+        logger.info(f"Found {len(taxonomy_groups)} unique taxa")
 
-    log.info("Found {:,} taxa in the DB".format(taxa_in_db.shape[0]))
+        # Process taxa in parallel
+        logger.info(f"Processing taxa using {config.workers} workers")
 
-    log.info("Checking assemblies already processed")
-
-    if not jobs_done.empty and not taxa_in_db.empty:
-        # check that there are no updates
-        jobs_done = jobs_done.merge(taxa_in_db).loc[:, ["accession", "file"]]
-        to_do = pd.concat(
-            [assm_data.loc[:, ["accession", "file"]], jobs_done, jobs_done]
-        ).drop_duplicates(keep=False)
-
-        to_do = assm_data[assm_data["accession"].isin(to_do["accession"])]
-
-        log.info("{:,} assemblies already processed\n".format(jobs_done.shape[0]))
-        to_rm = pd.concat([to_do.loc[:, ["taxonomy"]].drop_duplicates(), taxa_in_db])
-        to_rm = to_rm[to_rm["taxonomy"].duplicated()].reset_index()
-
-        if not to_rm.empty:
-            log.info("Found {:,} taxa that need to be updated\n".format(to_rm.shape[0]))
-            removed = delete_from_db(taxons=to_rm, con=con)
-            log.warning(
-                "Removed {:,} taxa and {:,} assemblies from DB".format(
-                    to_rm.shape[0], removed.shape[0]
-                )
-            )
-            if args.copy:
-                files_to_rm = (
-                    removed["file"].apply(lambda x: os.path.join(out_dir, x)).tolist()
-                )
-                if files_to_rm:
-                    files_removed = []
-                    for file in files_to_rm:
-                        if os.path.isfile(file):
-                            os.remove(file)
-                            files_removed.append(file)
-                    log.warning(
-                        "Removed {} assemblies from {}\n".format(
-                            len(files_removed), out_dir
-                        )
-                    )
-
-            rfname = prefix + "-derep-genomes_removed-db-entries.tsv"
-            removed.to_csv(rfname, index=False, sep="\t")
-
-    else:
-        log.info("No jobs found in the database\n")
-        to_do = assm_data
-
-    if not to_do.empty:
-        assm_min = 2
-        assm_max = args.assm_max
-
-        log.info("Splitting taxa in between singleton and non-singleton taxa")
-
-        taxon_counts = to_do.groupby("taxonomy", as_index=False)["taxonomy"].agg(
-            {"count": "count"}
+        # Create task manager
+        task_manager = ParallelTaskManager(
+            max_workers=config.workers, show_progress=True
         )
 
-        classification_singletons = taxon_counts[taxon_counts["count"] < 2][
-            "taxonomy"
-        ].tolist()
-        classification_singletons = to_do[
-            to_do["taxonomy"].isin(classification_singletons)
-        ].reset_index(drop=True)
+        # Process taxa
+        results = []
+        with Timer("Taxa processing"):
+            for taxon, taxon_genomes in taxonomy_groups.items():
+                results.append(process_taxon(taxon, taxon_genomes, config, db_ops))
 
-        if args.slurm_config:
-            classification_small = taxon_counts[
-                taxon_counts["count"].isin(range(assm_min, assm_max + 1))
-            ]["taxonomy"].tolist()
-            classification_small = to_do[
-                to_do["taxonomy"].isin(classification_small)
-            ].reset_index(drop=True)
+        # Copy representative files if requested
+        if config.copy:
+            copy_representative_files(results, genomes, dirs["reps"])
 
-            classification_large = taxon_counts[taxon_counts["count"] > assm_max][
-                "taxonomy"
-            ].tolist()
+        # Save results to TSV
+        output_file = dirs["results"] / f"derep-genomes_results_{config.timestamp}.tsv"
+        save_results_to_tsv(results, genomes, str(output_file))
 
-            classification_large = to_do[
-                to_do["taxonomy"].isin(classification_large)
-            ].reset_index(drop=True)
-        else:
-            classification_small = taxon_counts[taxon_counts["count"] > 1][
-                "taxonomy"
-            ].tolist()
-            classification_small = to_do[
-                to_do["taxonomy"].isin(classification_small)
-            ].reset_index(drop=True)
-            classification_large = pd.DataFrame()
-
-        if not classification_singletons.empty:
-            log.info(
-                "Processing {:,} singletons".format(classification_singletons.shape[0])
-            )
-            process_sigletons(
-                singletons=classification_singletons,
-                out_dir=args.out_dir,
-                threads=args.threads,
-                con=con,
-                copy=args.copy,
-            )
-        else:
-            log.info("No singletons found\n")
-
-        if not classification_small.empty:
-            if args.workers > 2:
-                workers = args.workers
-                processes = args.threads // workers
-            else:
-                workers = 1
-                processes = args.threads
-            taxons = list(set(classification_small["taxonomy"]))
-            log.info(
-                "Dereplicating {:,} taxa with {} to {} assemblies using {} workers with {} threads".format(
-                    len(taxons), assm_min, assm_max, workers, processes
-                )
-            )
-            parms_small = {
-                "classification": classification_small,
-                "threads": processes,
-                "threshold": args.threshold,
-                "chunks": args.chunks,
-                "slurm_config": None,
-                "slurm_threads": None,
-                "tmp_dir": tmp_dir,
-                "max_jobs_array": args.max_jobs_array,
-                "xash_threshold": args.xash_threshold,
-                "min_genome_size": args.min_genome_size,
-                "ani_fraglen_fraction": args.ani_fraglen_fraction,
-                "dashing": args.dashing,
-                "assm_max": assm_max,
-                "out_dir": args.out_dir,
-                # "con": con,
-                "copy": args.copy,
-            }
-
-            if is_debug():
-                dfs = list(
-                    map(partial(process_one_taxon, parms=parms_small), taxons),
-                )
-            else:
-
-                pbar = tqdm(
-                    total=len(taxons),
-                    desc="Taxa processed",
-                    leave=False,
-                    ncols=80,
-                )  # Init pbar
-                with ProcessPoolExecutor(workers) as executor:
-                    futures = [
-                        executor.submit(
-                            partial(process_one_taxon, taxon=tax, parms=parms_small)
-                        )
-                        for tax in taxons
-                    ]
-                    for _ in as_completed(futures):
-                        pbar.update(n=1)  # Increments counter
-                dfs = [f.result() for f in futures]
-                pbar.close()
-            # Get all failed jobs
-            failed_list = [x[2] for x in dfs if None not in dfs]
-            if all(v is None for v in failed_list):
-                failed = pd.DataFrame()
-            else:
-                failed = pd.concat([x[2] for x in dfs if None not in dfs])
-
-            derep_assemblies_list = [x[0] for x in dfs if None not in dfs]
-            if all(v is None for v in derep_assemblies_list):
-                derep_assemblies = pd.DataFrame()
-            else:
-                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
-
-            results_list = [x[1] for x in dfs if None not in dfs]
-            if all(v is None for v in results_list):
-                results = pd.DataFrame()
-            else:
-                results = pd.concat([x[1] for x in dfs if None not in dfs])
-
-            stats_df_list = [x[3] for x in dfs if None not in dfs]
-            if all(v is None for v in stats_df_list):
-                stats_df = pd.DataFrame()
-            else:
-                stats_df = pd.concat([x[3] for x in dfs if None not in dfs])
-
-            # Insert results into database
-            insert_to_db(
-                derep_assemblies=derep_assemblies,
-                results=results,
-                failed=failed,
-                stats_df=stats_df,
-                con=con,
-                threads=args.threads,
-                out_dir=args.out_dir,
-                copy=args.copy,
-            )
-        else:
-            log.info("No taxa with 2 to {} assemblies found\n".format(assm_max))
-
-        if not classification_large.empty:
-            taxons = list(set(classification_large["taxonomy"]))
-            log.info(
-                "Dereplicating {:,} taxa with more than {} assemblies using SLURM with {} threads".format(
-                    len(taxons), assm_max, args.slurm_threads
-                )
-            )
-            parms_large = {
-                "classification": classification_large,
-                "threads": args.threads,
-                "threshold": args.threshold,
-                "chunks": args.chunks,
-                "slurm_config": args.slurm_config.name,
-                "slurm_threads": args.slurm_threads,
-                "tmp_dir": tmp_dir,
-                "max_jobs_array": args.max_jobs_array,
-                "xash_threshold": args.xash_threshold,
-                "min_genome_size": args.min_genome_size,
-                "ani_fraglen_fraction": args.ani_fraglen_fraction,
-                "dashing": args.dashing,
-                "assm_max": assm_max,
-                "out_dir": args.out_dir,
-                "copy": args.copy,
-            }
-            if is_debug():
-                dfs = list(
-                    map(partial(process_one_taxon, parms=parms_large), taxons),
-                )
-            else:
-                dfs = list(
-                    tqdm(
-                        map(partial(process_one_taxon, parms=parms_large), taxons),
-                        total=len(taxons),
-                        leave=False,
-                        ncols=80,
-                    )
-                )
-            # Get all failed jobs
-            failed_list = [x[2] for x in dfs if None not in dfs]
-            if all(v is None for v in failed_list):
-                failed = pd.DataFrame()
-            else:
-                failed = pd.concat([x[2] for x in dfs if None not in dfs])
-
-            derep_assemblies_list = [x[0] for x in dfs if None not in dfs]
-            if all(v is None for v in derep_assemblies_list):
-                derep_assemblies = pd.DataFrame()
-            else:
-                derep_assemblies = pd.concat([x[0] for x in dfs if None not in dfs])
-
-            results_list = [x[1] for x in dfs if None not in dfs]
-            if all(v is None for v in results_list):
-                results = pd.DataFrame()
-            else:
-                results = pd.concat([x[1] for x in dfs if None not in dfs])
-
-            stats_df_list = [x[3] for x in dfs if None not in dfs]
-            if all(v is None for v in stats_df_list):
-                stats_df = pd.DataFrame()
-            else:
-                stats_df = pd.concat([x[3] for x in dfs if None not in dfs])
-
-            # Insert results into database
-            insert_to_db(
-                derep_assemblies=derep_assemblies,
-                results=results,
-                failed=failed,
-                stats_df=stats_df,
-                con=con,
-                threads=args.threads,
-                out_dir=args.out_dir,
-                copy=args.copy,
-            )
-        else:
-            if args.slurm_config:
-                log.info(
-                    "No taxa with more than {} assemblies found\n".format(assm_max)
-                )
-
-        jobs_done = retrieve_all_jobs_done(con)
-        jobs_failed = retrieve_all_jobs_failed(con)
-        genomes_derep = retrieve_all_genomes_derep(con)
-        logging.info(
-            "Jobs failed: {} / Jobs done: {}".format(
-                jobs_failed.shape[0], jobs_done.shape[0]
-            )
+        # Log summary
+        n_total = len(genomes)
+        n_reps = sum(
+            len(result.get("representatives", []))
+            for result in results
+            if result.get("status") in ("success", "singleton")
         )
-        if not jobs_done.empty and not genomes_derep.empty:
-            jobs_done = retrieve_all_jobs_done(con)
-            genomes_derep = retrieve_all_genomes_derep(con)
-            jobs_done = jobs_done.merge(genomes_derep)
-            fname = prefix + "-derep-genomes_results.tsv"
-            logging.info("Saving results to {}".format(fname))
-            jobs_done.loc[:, "src"] = jobs_done["file"]
-            if not args.copy:
-                jobs_done.loc[:, "dst"] = ""
-            else:
-                jobs_done.loc[:, "dst"] = jobs_done["file"].apply(
-                    lambda x: os.path.join(pathlib.Path(out_dir, pathlib.Path(x).name))
-                )
 
-                files = pd.DataFrame()
-                files.loc[:, "src"] = jobs_done.loc[:, "src"]
-                files.loc[:, "dst"] = jobs_done.loc[:, "dst"]
-                files = list(files.itertuples(index=False, name=None))
+        logger.info(
+            f"Dereplication complete. {n_reps} representatives out of {n_total} genomes ({n_reps/n_total*100:.2f}%)"
+        )
 
-                log.info(
-                    "Copying dereplicated {:,} assemblies to output directory".format(
-                        len(files)
-                    )
-                )
+        # Log memory usage
+        log_memory_usage("Final memory usage")
+        from derep_genomes.utils.helpers import genome_length_cache
 
-                if is_debug():
-                    files = list(map(copy_files, files))
-                else:
-                    p = Pool(args.threads)
-                    files = list(
-                        tqdm(
-                            p.imap_unordered(copy_files, files),
-                            total=len(files),
-                            leave=False,
-                            ncols=80,
-                        )
-                    )
-                p.close()
-                p.join()
-                log.info(
-                    "Dereplication complete. Jobs saved to DB and files copied to {}\n".format(
-                        out_dir
-                    )
-                )
-
-            jobs_done["representative"] = jobs_done["representative"].astype(bool)
-            jobs_done[["taxonomy", "accession", "representative", "src", "dst"]].to_csv(
-                fname, index=False, sep="\t"
-            )
-    else:
-        logging.info("Didn't find any new assemblies to process")
-
-    con.close()
+        logger.info(f"Genome length cache stats: {genome_length_cache.get_stats()}")
 
 
 if __name__ == "__main__":
